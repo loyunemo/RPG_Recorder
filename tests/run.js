@@ -1296,6 +1296,61 @@ test('损坏的日志行不会影响其余事件读取', () => {
   }
 });
 
+/* ══════════════════════════ 渲染层接口一致性 ══════════════════════════ */
+
+group('渲染层接口一致性');
+
+test('视图里用到的 app.* 方法都在 app.js 的导出对象里', () => {
+  const rendererDir = path.join(import.meta.dirname, '..', 'src', 'renderer');
+  const appSrc = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
+
+  // 取 `export const app = { ... };` 里列出的键
+  const objMatch = /export const app = \{([\s\S]*?)\n\};/.exec(appSrc);
+  assert.ok(objMatch, '没能从 app.js 里解析出 app 导出对象');
+  const exported = new Set(
+    [...objMatch[1].matchAll(/^\s{2}([A-Za-z_$][\w$]*)\s*,/gm)].map(m => m[1]),
+  );
+  assert.ok(exported.size > 10, `解析出的导出项太少（${exported.size}），正则可能失效了`);
+
+  // 视图里每一处 app.xxx( 都必须能在导出对象里找到。
+  // 这条测试是为了防住「函数写好了但忘了加进 app 对象」——视图一调用就崩，
+  // 而且只有真的点到那个界面才会暴露。
+  const viewsDir = path.join(rendererDir, 'views');
+  const missing = [];
+  for (const f of fs.readdirSync(viewsDir).filter(x => x.endsWith('.js'))) {
+    const src = fs.readFileSync(path.join(viewsDir, f), 'utf8');
+    for (const m of src.matchAll(/\bapp\.([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (!exported.has(m[1])) missing.push(`${f} → app.${m[1]}()`);
+    }
+  }
+  assert.deepEqual(missing, [], `以下方法被视图调用但没在 app.js 中导出：\n  ${missing.join('\n  ')}`);
+});
+
+test('前端模块之间的相对导入路径都存在', () => {
+  const rendererDir = path.join(import.meta.dirname, '..', 'src', 'renderer');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) files.push(p);
+    }
+  };
+  walk(rendererDir);
+
+  const broken = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    for (const m of src.matchAll(/from\s+['"](\.[^'"]+)['"]/g)) {
+      const target = path.resolve(path.dirname(f), m[1]);
+      if (!fs.existsSync(target)) {
+        broken.push(`${path.relative(rendererDir, f)} → ${m[1]}`);
+      }
+    }
+  }
+  assert.deepEqual(broken, [], `以下导入指向了不存在的文件：\n  ${broken.join('\n  ')}`);
+});
+
 /* ══════════════════════════ 汇总 ══════════════════════════ */
 
 process.stdout.write(`\n${'─'.repeat(52)}\n`);

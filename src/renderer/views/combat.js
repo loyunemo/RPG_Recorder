@@ -8,6 +8,7 @@
 import { h, render, toast, confirmDialog } from '../util.js';
 import { rollExpr } from '../../core/dice.js';
 import { getRuleset } from '../../core/rulesets/index.js';
+import { platform } from '../platform.js';
 import { combatantFromCharacter, blankCombatant, setTrackValue, getTrack } from '../characterOps.js';
 
 const COMMON_CONDITIONS = ['中毒', '麻痹', '束缚', '目盲', '恐惧', '流血', '倒地', '隐身', '加速'];
@@ -17,9 +18,102 @@ export function renderCombatView(root, app) {
   const container = h('div');
   render(root, container);
 
+  // 玩家只读：战斗由主持人推进，界面上不给任何会写盘的入口
+  if (!platform.isGm) {
+    renderCombatReadOnly(container, app, combat);
+    return;
+  }
+
   container.appendChild(controlCard(app, combat));
   container.appendChild(setupCard(app, combat));
   container.appendChild(listCard(app, combat));
+}
+
+/* ────────────────────────── 玩家视角（只读） ────────────────────────── */
+
+function renderCombatReadOnly(container, app, combat) {
+  const list = sortedCombatants(combat);
+
+  if (!combat.active && !list.length) {
+    container.appendChild(h('div.empty', {},
+      h('div.big', {}, '⚔️'),
+      '主持人还没有开始战斗',
+      h('br'),
+      h('span.tiny', {}, '战斗开始后，这里会实时显示先攻顺序与各人状态')));
+    return;
+  }
+
+  const current = combat.active ? list[combat.turnIndex] : null;
+
+  container.appendChild(h('div.card', {},
+    h('h3', {}, '战况',
+      combat.active
+        ? h('span.badge', { style: { background: '#5a2f2c', color: '#ffc9c5' } }, `第 ${combat.round} 回合`)
+        : h('span.badge', {}, '未开始'),
+      h('div.spacer'),
+      h('span.tiny.muted', { style: { textTransform: 'none', letterSpacing: 0 } }, `${list.length} 名参战者`),
+    ),
+    current
+      ? h('div', {
+        style: {
+          background: 'var(--bg-2)', border: '1px solid var(--accent-dim)',
+          borderRadius: 'var(--radius)', padding: '10px 13px',
+        },
+      },
+        h('div', { style: { fontSize: '11px', color: 'var(--muted)', letterSpacing: '.06em' } }, '当前行动者'),
+        h('div', { style: { fontSize: '19px', fontWeight: 700, marginTop: '2px' } }, current.name),
+        h('div.tiny.muted', {}, `先攻 ${current.initiative ?? '—'} · 生命 ${current.hp}/${current.maxHp}`),
+        current.conditions ? h('div.tiny', { style: { color: 'var(--warn)', marginTop: '3px' } }, `状态：${current.conditions}`) : null,
+      )
+      : h('div.tiny.muted', {}, '战斗尚未开始'),
+  ));
+
+  // 顺序表
+  const rows = list.map((cb, i) => {
+    const isCurrent = combat.active && i === combat.turnIndex;
+    const pct = cb.maxHp > 0 ? Math.max(0, Math.min(100, (cb.hp / cb.maxHp) * 100)) : 0;
+    return h('div', {
+      style: {
+        background: isCurrent ? 'var(--bg-3)' : 'var(--bg-2)',
+        border: `1px solid ${isCurrent ? 'var(--accent-dim)' : 'var(--border-soft)'}`,
+        borderRadius: 'var(--radius)', padding: '9px 11px',
+        opacity: cb.defeated ? .55 : 1,
+      },
+    },
+      h('div.row', { style: { gap: '9px' } },
+        isCurrent ? h('span', { style: { color: 'var(--accent)', fontWeight: 700 } }, '▶') : h('span', { style: { width: '11px' } }),
+        h('span.mono.tiny.muted', { style: { width: '26px' } }, String(cb.initiative ?? '—')),
+        h('span', { style: { flex: '1', fontWeight: 600, textDecoration: cb.defeated ? 'line-through' : 'none' } }, cb.name),
+        h('div', {
+          style: {
+            flex: '1', minWidth: '90px', height: '17px', background: 'var(--bg)',
+            borderRadius: '5px', overflow: 'hidden', position: 'relative', border: '1px solid var(--border-soft)',
+          },
+        },
+          h('div', {
+            style: {
+              width: pct + '%', height: '100%', transition: 'width .2s',
+              background: pct > 50 ? '#a8443f' : pct > 20 ? '#b06a2f' : '#7a2f2c',
+            },
+          }),
+          h('div', {
+            style: {
+              position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+              fontSize: '11px', fontFamily: 'var(--mono)', textShadow: '0 1px 3px #000c',
+            },
+          }, `${cb.hp} / ${cb.maxHp}`),
+        ),
+      ),
+      cb.conditions ? h('div.tiny', { style: { color: 'var(--warn)', marginTop: '4px', marginLeft: '46px' } }, cb.conditions) : null,
+    );
+  });
+
+  container.appendChild(h('div.card', {},
+    h('h3', {}, '先攻顺序'),
+    rows.length
+      ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } }, rows)
+      : h('div.tiny.muted', {}, '暂无参战者'),
+  ));
 }
 
 /* ────────────────────────── 战斗控制 ────────────────────────── */

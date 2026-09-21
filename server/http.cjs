@@ -162,7 +162,8 @@ function createTableServer({ store, hub, table, appRoot, port = 41777 }) {
             summary: summariseCharacter(c),
             claimedBy: ownerOf[c.id] || null,
           })),
-          players: Object.entries(seats).map(([pid, s]) => ({ playerId: pid, name: s.name })),
+          // 「已在场」只列当前真正连着的人，而不是历史上留下过的所有席位
+          players: table.presence().map(p => ({ playerId: p.playerId, name: p.name, online: p.online })),
         });
       }
 

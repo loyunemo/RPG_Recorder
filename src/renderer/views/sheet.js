@@ -2,6 +2,7 @@
 
 import { h, render, numInput, textInput, toast, confirmDialog } from '../util.js';
 import { setTrackValue } from '../characterOps.js';
+import { platform } from '../platform.js';
 
 export function renderSheetView(root, app) {
   const char = app.selectedCharacter();
@@ -11,23 +12,41 @@ export function renderSheetView(root, app) {
       h('div.big', {}, '📋'),
       '还没有选中角色',
       h('br'),
-      h('button.btn.primary.sm', { style: { marginTop: '10px' }, onclick: () => app.newCharacterFlow() }, '创建角色卡'),
+      platform.isGm
+        ? h('button.btn.primary.sm', { style: { marginTop: '10px' }, onclick: () => app.newCharacterFlow() }, '创建角色卡')
+        : h('span.tiny', {}, '请让主持人先建好角色卡，或从左侧认领一张'),
     ));
     return;
   }
 
   const rs = app.ruleset();
+  const editable = app.canEditCharacter(char.id);
+
   const container = h('div');
   render(root, container);
 
-  container.appendChild(sheetHeader(app, char, rs));
+  // 不是自己的角色卡：只读。用 pointer-events 挡住交互，比逐个输入框禁用更不容易漏。
+  const body = h('div', editable ? {} : { style: { pointerEvents: 'none', opacity: '.72' } });
 
-  if (rs.id === 'coc7') renderCoc7(container, app, char);
-  else if (rs.id === 'dnd5e') renderDnd5e(container, app, char);
-  else if (rs.id === 'huazhu') renderHuazhu(container, app, char, rs);
-  else renderDaggerheart(container, app, char);
+  if (!editable) {
+    container.appendChild(h('div.card', {
+      style: { borderColor: 'var(--warn)', background: '#2b2416', padding: '10px 13px' },
+    },
+      h('div', { style: { fontWeight: 600, color: 'var(--warn)' } }, '👁 只读'),
+      h('div.tiny.muted', { style: { marginTop: '3px' } },
+        `「${char.name}」归其他玩家所有，你可以查看，但改动不会保存。`),
+    ));
+  }
 
-  container.appendChild(notesCard(app, char));
+  body.appendChild(sheetHeader(app, char, rs, editable));
+
+  if (rs.id === 'coc7') renderCoc7(body, app, char);
+  else if (rs.id === 'dnd5e') renderDnd5e(body, app, char);
+  else if (rs.id === 'huazhu') renderHuazhu(body, app, char, rs);
+  else renderDaggerheart(body, app, char);
+
+  body.appendChild(notesCard(app, char));
+  container.appendChild(body);
   return container;
 }
 
@@ -279,20 +298,25 @@ function sheetHeader(app, char, rs) {
       nameInput,
       h('span.badge.' + rs.id, {}, rs.short),
       h('div.spacer'),
-      h('button.btn.sm', { onclick: () => app.newCharacterFlow() }, '＋ 新角色'),
-      h('button.btn.sm.danger', {
-        onclick: async () => {
-          const ok = await confirmDialog('删除角色卡', `确定要删除「${char.name}」吗？此操作不可撤销（但日志会保留删除记录）。`, '删除');
-          if (!ok) return;
-          const { call } = await import('../platform.js');
-          await call('deleteCharacter', { cid: app.state.campaign.id, id: char.id });
-          await app.reloadCharacters();
-          await app.reloadEvents();
-          app.state.selectedCharacterId = app.state.characters[0]?.id || null;
-          app.renderAll();
-          toast('已删除');
-        },
-      }, '删除'),
+      // 新建 / 删除都是主持人权限
+      platform.isGm
+        ? h('button.btn.sm', { onclick: () => app.newCharacterFlow() }, '＋ 新角色')
+        : null,
+      platform.isGm
+        ? h('button.btn.sm.danger', {
+          onclick: async () => {
+            const ok = await confirmDialog('删除角色卡', `确定要删除「${char.name}」吗？此操作不可撤销（但日志会保留删除记录）。`, '删除');
+            if (!ok) return;
+            const { call } = await import('../platform.js');
+            await call('deleteCharacter', { cid: app.state.campaign.id, id: char.id });
+            await app.reloadCharacters();
+            await app.reloadEvents();
+            app.state.selectedCharacterId = app.state.characters[0]?.id || null;
+            app.renderAll();
+            toast('已删除');
+          },
+        }, '删除')
+        : null,
     ),
     tracks,
   );

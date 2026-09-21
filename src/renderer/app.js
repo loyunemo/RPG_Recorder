@@ -309,6 +309,11 @@ export async function performCheck(req, opts = {}) {
     toast('请先选择一个角色', true);
     return;
   }
+  // 玩家只能掷自己认领的角色卡；提前拦下，免得收到一个看不懂的 403
+  if (!platform.isGm && !(state.participant?.characterIds || []).includes(char.id)) {
+    toast(`「${char.name}」不是你的角色卡。请让主持人在牌桌上把它分配给你。`, true);
+    return;
+  }
   const rs = ruleset();
   const rng = freshRng();
   let result;
@@ -579,6 +584,16 @@ export function renderAll() {
 function renderTopbar() {
   const bar = document.getElementById('topbar');
 
+  // 加入牌桌阶段还没进战役，顶栏只留品牌，别显示空的战役/场次下拉
+  if (state.needsJoin) {
+    render(bar,
+      h('div.brand', {}, h('span.die', {}, '🎲'), '跑团记录系统'),
+      h('div.spacer'),
+      h('span.tiny.muted', {}, '正在加入牌桌…'),
+    );
+    return;
+  }
+
   if (!state.campaigns.length && !state.needsJoin) {
     render(bar,
       h('div.brand', {}, h('span.die', {}, '🎲'), '跑团记录系统'),
@@ -840,7 +855,15 @@ function pcCard(c) {
       renderMain();
     },
   },
-    h('div.name', {}, c.name || '（无名）'),
+    h('div.name', {},
+      c.name || '（无名）',
+      // 玩家视角：标出哪些卡是自己的
+      !platform.isGm
+        ? (canEditCharacter(c.id)
+          ? h('span.badge', { style: { marginLeft: 'auto', background: '#2c4436', color: '#9fd9b6' } }, '我的')
+          : h('span.badge', { style: { marginLeft: 'auto' } }, '只读'))
+        : null,
+    ),
     h('div.sub', {}, describeCharacter(c)),
     bars,
   );
@@ -904,23 +927,38 @@ function renderMain() {
 /** 把战斗状态写回战役的 state.json（防抖，回合内多次点击合并成一次写盘） */
 export const saveCombat = debounce(async () => {
   if (!state.campaign) return;
-  await call('saveState', {
-    cid: state.campaign.id,
-    patch: { combat: state.combat },
-  });
+  // 玩家无权修改战斗状态，直接跳过以免每次点击都弹一个 403
+  if (!platform.isGm) return;
+  try {
+    await call('saveState', {
+      cid: state.campaign.id,
+      patch: { combat: state.combat },
+    });
+  } catch (err) {
+    console.warn('[combat] 保存失败：', err.message);
+  }
 }, 250);
 
-/** 记住当前选中的角色，下次打开战役时恢复 */
+/** 记住当前选中的角色，下次打开战役时恢复（玩家也可以写这个字段） */
 export const rememberSelection = debounce(async () => {
   if (!state.campaign) return;
-  await call('saveState', {
-    cid: state.campaign.id,
-    patch: { selectedCharacterId: state.selectedCharacterId },
-  });
+  try {
+    await call('saveState', {
+      cid: state.campaign.id,
+      patch: { selectedCharacterId: state.selectedCharacterId },
+    });
+  } catch { /* 玩家席位可能已失效，忽略 */ }
 }, 400);
 
-/** 改动战斗状态：立即改内存并刷新界面，落盘防抖 */
+/**
+ * 改动战斗状态：立即改内存并刷新界面，落盘防抖。
+ * 玩家只读 —— 界面本来就不该给出这些入口，这里再兜一道底。
+ */
 export function updateCombat(mutator, opts = {}) {
+  if (!platform.isGm) {
+    toast('战斗由主持人掌控', true);
+    return;
+  }
   mutator(state.combat);
   if (opts.render !== false) renderMain();
   saveCombat();
@@ -1024,6 +1062,8 @@ export const app = {
   state,
   ruleset,
   selectedCharacter,
+  canEditCharacter,
+  isGm,
   freshRng,
   performCheck,
   performOpposedCheck,

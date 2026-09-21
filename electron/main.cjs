@@ -31,6 +31,16 @@ let gmParticipant;      // 本机 GM 在牌桌上的身份
 let tableServer;        // 开桌后才启动的 HTTP + SSE 服务
 let tablePort = Number(process.env.RW_PORT || 41777);
 
+/**
+ * 开发辅助：`--url=<地址>` 会让窗口加载远程地址且**不挂载 preload**，
+ * 也就是以「浏览器」而非「桌面端」的身份运行。
+ * 用来验证玩家视角 —— 否则 GM 的桌面端永远看不到加入界面。
+ */
+const REMOTE_URL = (() => {
+  const arg = process.argv.find(a => a.startsWith('--url='));
+  return arg ? arg.slice('--url='.length) : null;
+})();
+
 /** 开启牌桌：启动 HTTP 服务，局域网玩家即可接入 */
 function openTable(campaignId, gmName = '主持人') {
   if (table.isOpen) {
@@ -117,14 +127,19 @@ function createWindow() {
     title: '跑团记录系统',
     autoHideMenuBar: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
+      // --url 模式刻意不挂 preload，让它表现得和浏览器一致（用于验证玩家视角）
+      preload: REMOTE_URL ? undefined : path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: false,
     },
   });
 
-  mainWindow.loadFile(path.join(APP_ROOT, 'src', 'renderer', 'index.html'));
+  if (REMOTE_URL) {
+    mainWindow.loadURL(REMOTE_URL);
+  } else {
+    mainWindow.loadFile(path.join(APP_ROOT, 'src', 'renderer', 'index.html'));
+  }
 
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -137,6 +152,102 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error('[random-walking] 渲染进程崩溃：', details);
   });
+
+  // 开发辅助：--shot-player <目录> 以浏览器身份跑一遍玩家流程并截图
+  const playerShotIdx = process.argv.indexOf('--shot-player');
+  if (playerShotIdx >= 0) {
+    const outDir = path.resolve(process.argv[playerShotIdx + 1] || 'player-shots');
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    mainWindow.webContents.once('did-finish-load', async () => {
+      const js = (code) => mainWindow.webContents.executeJavaScript(`(() => { ${code} })()`)
+        .catch(() => null);
+      const shoot = async (name) => {
+        try {
+          // 窗口必须真的可见并由合成器绘制过，capturePage 才不会返回空图
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.moveTop();
+          await sleep(350);
+          const image = await mainWindow.webContents.capturePage();
+          if (image.isEmpty()) {
+            console.error('[shot] 抓到空图：', name);
+            return;
+          }
+          fs.mkdirSync(outDir, { recursive: true });
+          fs.writeFileSync(path.join(outDir, `${name}.png`), image.toPNG());
+          console.log('[shot] 截图：', name);
+        } catch (err) { console.error('[shot] 失败：', err.message); }
+      };
+
+      try {
+        await sleep(1500);
+        // 上次跑完会把令牌留在 localStorage 里，那样会直接跳过加入界面。
+        // 每次验证都从干净状态开始，才能截到玩家真正看到的加入页。
+        await js(`localStorage.clear(); return true;`);
+        mainWindow.webContents.reload();
+        await sleep(2600);
+        await shoot('1-join');
+
+        // 填名字、选第一张角色卡、加入
+        await js(`
+          const nameInput = [...document.querySelectorAll('input')].find(i => (i.placeholder || '').includes('你的名字'));
+          if (nameInput) nameInput.value = '测试玩家';
+          const card = document.querySelector('.radio-card');
+          if (card) card.click();
+          return true;`);
+        await sleep(500);
+        await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('加入牌桌'))?.click(); return true;`);
+
+        // 加入后页面会 reload，轮询等玩家界面就绪
+        let ready = false;
+        for (let i = 0; i < 40 && !ready; i++) {
+          await sleep(500);
+          ready = await js(`return document.querySelectorAll('.tab').length >= 4;`);
+        }
+        console.log('[shot] 玩家界面就绪：', ready);
+        await sleep(1500);
+        await shoot('2-dice');
+
+        const probe = await js(`
+          const t = document.body.innerText;
+          return {
+            身份: document.querySelector('.topbar .chip')?.innerText || '(无)',
+            有开桌按钮: t.includes('开启牌桌'),
+            有新建战役: t.includes('新战役'),
+            有数据目录: t.includes('数据目录'),
+          };`);
+        console.log('[shot] 玩家视角探针：', JSON.stringify(probe));
+
+        await js(`document.querySelectorAll('.tab')[1]?.click(); return true;`);
+        await sleep(900);
+        await shoot('3-combat');
+        const combatProbe = await js(`
+          return {
+            有开始按钮: document.body.innerText.includes('开始战斗'),
+            有添加参战者: document.body.innerText.includes('添加参战者'),
+          };`);
+        console.log('[shot] 玩家战斗页探针：', JSON.stringify(combatProbe));
+
+        await js(`document.querySelectorAll('.tab')[2]?.click(); return true;`);
+        await sleep(900);
+        await shoot('4-sheet');
+
+        await js(`document.querySelectorAll('.tab')[3]?.click(); return true;`);
+        await sleep(900);
+        await shoot('5-notes');
+        const notesProbe = await js(`
+          return {
+            有开始新场次: document.body.innerText.includes('开始新场次'),
+            有数据目录卡: document.body.innerText.includes('可直接用文本编辑器打开'),
+          };`);
+        console.log('[shot] 玩家笔记页探针：', JSON.stringify(notesProbe));
+      } catch (err) {
+        console.error('[shot] 玩家流程出错：', err && err.stack || err);
+      } finally {
+        app.quit();
+      }
+    });
+  }
 
   // 开发辅助：--screenshot <目录> 遍历战役与标签页截图，用于快速核对界面
   const shotIdx = process.argv.indexOf('--screenshot');

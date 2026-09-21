@@ -1,6 +1,7 @@
 /** 判定面板：目标选择 → 修正 → 投掷 → 结果展示，另含快速骰与自由骰式。 */
 
 import { h, render, toast, fmtTime } from '../util.js';
+import { platform } from '../platform.js';
 
 /** 面板自身的临时状态，切 Tab 不丢失 */
 const local = {
@@ -36,12 +37,28 @@ export function renderDiceView(root, app) {
   if (!char) {
     container.appendChild(h('div.empty', {},
       h('div.big', {}, '🎲'),
-      '请先在左侧选择或创建一个角色',
+      platform.isGm ? '请先在左侧选择或创建一个角色' : '你还没有认领角色卡',
       h('br'),
-      h('span.tiny', {}, '所有判定都会记录到当前角色名下'),
+      h('span.tiny', {}, platform.isGm
+        ? '所有判定都会记录到当前角色名下'
+        : '请让主持人在牌桌上把一张角色卡分配给你，然后刷新页面'),
     ));
     container.appendChild(freeRollCard(app));
     return;
+  }
+
+  // 玩家点了别人的角色卡：明确告诉他，别让他掷完才发现被拒
+  const mine = platform.isGm || (state.participant?.characterIds || []).includes(char.id);
+  if (!mine) {
+    container.appendChild(h('div.card', {
+      style: { borderColor: 'var(--warn)', background: '#2b2416' },
+    },
+      h('div', { style: { fontWeight: 600, color: 'var(--warn)', marginBottom: '6px' } },
+        `「${char.name}」不是你的角色卡`),
+      h('div.tiny.muted', {},
+        '现在选中的是其他玩家的角色，判定按钮不会生效。请从左侧切换到你自己的角色卡；'
+        + '如果你还没有角色卡，请联系主持人分配。'),
+    ));
   }
 
   // 目标变化时重置选择，避免角色切换后指向新角色不存在的技能（那样会静默按 0 计算）
