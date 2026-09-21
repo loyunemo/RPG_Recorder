@@ -10,6 +10,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { Store } = require('./store.cjs');
 const { createRoutes } = require('./routes.cjs');
+const { Table, lanAddress } = require('../server/table.cjs');
+const { Hub } = require('../server/hub.cjs');
+const { createTableServer } = require('../server/http.cjs');
 
 const APP_ROOT = path.join(__dirname, '..');
 
@@ -22,6 +25,87 @@ function resolveDataDir() {
 
 let store;
 let mainWindow;
+let table;              // 牌桌（多人）
+let hub;                // 调用与广播的唯一入口
+let gmParticipant;      // 本机 GM 在牌桌上的身份
+let tableServer;        // 开桌后才启动的 HTTP + SSE 服务
+let tablePort = Number(process.env.RW_PORT || 41777);
+
+/** 开启牌桌：启动 HTTP 服务，局域网玩家即可接入 */
+function openTable(campaignId, gmName = '主持人') {
+  if (table.isOpen) {
+    if (table.campaignId === campaignId) {
+      return { alreadyOpen: true, ...tableInfo() };
+    }
+    table.close();
+  }
+  const { campaign, gm } = table.open(campaignId, gmName);
+  gmParticipant = gm;
+  gmParticipant.local = true;   // 标记为本地 GM，广播时不回灌自己
+
+  if (!tableServer) {
+    tableServer = createTableServer({
+      store, hub, table, appRoot: APP_ROOT, port: tablePort,
+    });
+    tableServer.listen(tablePort, '0.0.0.0');
+  }
+
+  return { campaign, ...tableInfo() };
+}
+
+function closeTable() {
+  if (table.isOpen) table.close();
+  gmParticipant = null;
+  return { ok: true };
+}
+
+function tableInfo() {
+  return {
+    open: table.isOpen,
+    campaignId: table.campaignId,
+    openedAt: table.openedAt,
+    joinUrl: table.isOpen ? `http://${lanAddress()}:${tablePort}/` : null,
+    lanAddress: lanAddress(),
+    port: tablePort,
+    presence: table.isOpen ? table.presence() : [],
+    seats: table.isOpen ? (store.getState(table.campaignId).seats || {}) : {},
+  };
+}
+
+/** GM 调整某个玩家的角色卡归属 */
+function seatPlayer({ playerId, characterIds = [] }) {
+  if (!table.isOpen) throw new Error('牌桌未开启');
+  const seats = store.getState(table.campaignId).seats || {};
+  if (!seats[playerId]) throw new Error('找不到该玩家的席位');
+
+  // 从其他席位里摘掉这些角色，保证一张卡只属于一个人
+  for (const [pid, seat] of Object.entries(seats)) {
+    if (pid === playerId) continue;
+    seat.characterIds = (seat.characterIds || []).filter(id => !characterIds.includes(id));
+  }
+  seats[playerId].characterIds = characterIds;
+  store.saveState(table.campaignId, { seats });
+
+  for (const p of table.sessions.values()) {
+    if (p.playerId === playerId) p.characterIds = characterIds;
+  }
+  table.broadcastPresence();
+  return { ok: true, seats };
+}
+
+/** 请某位玩家离席 */
+function unseatPlayer({ playerId }) {
+  if (!table.isOpen) throw new Error('牌桌未开启');
+  const seats = store.getState(table.campaignId).seats || {};
+  delete seats[playerId];
+  store.saveState(table.campaignId, { seats });
+
+  for (const [token, p] of [...table.sessions]) {
+    if (p.playerId === playerId) table.sessions.delete(token);
+  }
+  table.broadcastPresence();
+  return { ok: true, seats };
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -94,6 +178,14 @@ function createWindow() {
         `const s = document.querySelectorAll('.topbar select')[0];
          if (!s || !s.options[${i}]) return false;
          s.selectedIndex = ${i}; s.dispatchEvent(new Event('change')); return true;`);
+      // 按系统判断当前是哪个战役，不要靠下拉顺序 —— 加了新规则集就会错位
+      const currentSystem = () => js(
+        `const b = document.querySelector('.topbar .badge');
+         if (!b) return '';
+         for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+           if (b.classList.contains(id)) return id;
+         }
+         return '';`);
 
       // 逐个战役截图；pickCampaign 返回 false 说明下拉里已经没有这一项了
       for (let c = 0; c < 8; c++) {
@@ -105,11 +197,12 @@ function createWindow() {
         // 切战役后要等新的战役数据加载完（select 重建）再操作
         await waitFor(`document.querySelectorAll('.tab').length >= 4`);
         await sleep(c === 0 ? 600 : 1000);
+        const sys = await currentSystem();
 
         // 判定页：选一个目标并投掷
         await clickTab(0);
         await sleep(400);
-        if (c === 2) {
+        if (sys === 'coc7') {
           // COC：故意挑一个成功率极低的技能，好触发「孤注一掷」入口
           await js(`[...document.querySelectorAll('.target')].find(b => b.textContent.includes('潜水'))?.click(); return true;`);
         } else {
@@ -120,10 +213,10 @@ function createWindow() {
         await sleep(1100);
         await js(`document.querySelector('.result')?.scrollIntoView({ block: 'center' }); return true;`);
         await sleep(400);
-        await shoot(`${c}-dice`);
+        await shoot(`${c}-dice-${sys}`);
 
         // 验证孤注一掷与对抗检定确实可用（COC）
-        if (c === 2) {
+        if (sys === 'coc7') {
           const push = await js(`return [...document.querySelectorAll('button')].some(b => b.textContent.trim() === '孤注一掷') ? '出现' : '未出现';`);
           console.log('[shot] 孤注一掷按钮：', push);
           await js(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '对抗')?.click(); return true;`);
@@ -178,13 +271,29 @@ function createWindow() {
         await clickTab(2);
         await sleep(600);
         // DND：点一次死亡豁免，确认投掷并写进日志
-        if (c === 1) {
+        if (sys === 'dnd5e') {
           const clicked = await js(`const b = [...document.querySelectorAll('button')].find(x => x.textContent.includes('投掷死亡豁免')); if (!b) return false; b.click(); return true;`);
           await sleep(1100);
           const logged = await js(`return (document.querySelector('.log-item .l-title')?.textContent || '').includes('死亡豁免') ? '已记录' : '未记录';`);
           console.log('[shot] 死亡豁免（点击=' + clicked + '）：', logged);
         }
-        await shoot(`${c}-sheet`);
+        // 华渚：确认法门 / 九玄技 / 领域卡三块专属面板都渲染出来了
+        if (sys === 'huazhu') {
+          const probe = await js(`
+            const text = document.body.innerText;
+            return [
+              text.includes('法门与宗门') ? '法门✓' : '法门✗',
+              text.includes('九玄技') ? '九玄技✓' : '九玄技✗',
+              text.includes('领域卡') ? '领域卡✓' : '领域卡✗',
+              text.includes('位阶') ? '位阶✓' : '位阶✗',
+              text.includes('道心经历') ? '道心✓' : '道心✗',
+              text.includes('华渚声望') ? '声望✓' : '声望✗',
+            ].join(' ');`);
+          console.log('[shot] 华渚专属面板：', probe);
+          const cls = await js(`return document.querySelector('select.select')?.options?.length || 0;`);
+          console.log('[shot] 法门下拉项数：', cls);
+        }
+        await shoot(`${c}-sheet-${sys}`);
 
         await clickTab(3);
         await sleep(500);
@@ -259,6 +368,7 @@ function buildMenu() {
 app.whenReady().then(() => {
   const dataDir = resolveDataDir();
   store = new Store(dataDir);
+  table = new Table(store);
   console.log('[random-walking] 数据目录：', store.root);
 
   const routes = createRoutes({
@@ -267,10 +377,23 @@ app.whenReady().then(() => {
     saveFile: saveFileWithDialog,
   });
 
+  hub = new Hub({
+    store,
+    routes,
+    table,
+    // 玩家在浏览器里改的东西，推回本机界面
+    onLocal: (msg) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('rw:sync', msg);
+      }
+    },
+  });
+
+  // 本机界面 = 主持人；牌桌没开时 participant 为 null，即单机模式
   ipcMain.handle('rw:call', async (_evt, op, args = {}) => {
-    const fn = routes[op];
-    if (!fn) throw new Error(`未知的存储操作：${op}`);
-    return fn(args);
+    const participant = table.isOpen ? gmParticipant : null;
+    const result = await hub.call(op, args, participant);
+    return hub.filterFor(op, result, participant);
   });
 
   ipcMain.handle('rw:info', () => ({
@@ -281,6 +404,17 @@ app.whenReady().then(() => {
     electron: process.versions.electron,
   }));
 
+  ipcMain.handle('rw:table', (_evt, action, payload = {}) => {
+    switch (action) {
+      case 'open': return openTable(payload.campaignId, payload.gmName);
+      case 'close': return closeTable();
+      case 'status': return tableInfo();
+      case 'seatPlayer': return seatPlayer(payload);
+      case 'unseatPlayer': return unseatPlayer(payload);
+      default: throw new Error(`未知的牌桌操作：${action}`);
+    }
+  });
+
   buildMenu();
   createWindow();
 
@@ -290,5 +424,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  if (table?.isOpen) table.close();
+  if (tableServer) tableServer.close();
   if (process.platform !== 'darwin') app.quit();
 });

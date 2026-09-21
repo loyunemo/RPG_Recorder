@@ -62,6 +62,7 @@ export function openNewCampaignDialog() {
 function describeRuleset(id) {
   if (id === 'coc7') return 'd100 判定，奖励骰 / 惩罚骰，理智与幸运；技能百分比制。';
   if (id === 'dnd5e') return 'd20 判定，优势 / 劣势，属性调整值与熟练加值，法术位。';
+  if (id === 'huazhu') return '匕首之心的中式奇幻扩展：13 法门 / 55 宗门流派 / 27 种族 / 15 领域 315 张领域卡，另有位阶、道心经历、声望与九玄技。';
   return '双重骰 2d12，希望与恐惧，会心一击；压力与护甲槽打勾制。';
 }
 

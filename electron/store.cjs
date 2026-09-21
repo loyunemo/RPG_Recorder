@@ -331,8 +331,12 @@ class Store {
       title: e.title ?? '',
       detail: e.detail ?? '',
       tags: e.tags ?? [],
+      // 可见性必须保留：多人模式下玩家不该看到 visibility 为 gm 的事件
+      visibility: e.visibility === 'gm' ? 'gm' : 'public',
       data: e.data ?? null,
       seed: e.seed ?? e.data?.seed ?? null,
+      // 关联到触发它的那条事件（例如孤注一掷挂在原始判定下）
+      parentEventId: e.parentEventId ?? e.data?.parentEventId ?? null,
     }));
     ensureDir(this.logDir(cid));
     fs.appendFileSync(file, stamped.map(e => `${JSON.stringify(e)}\n`).join(''), 'utf8');

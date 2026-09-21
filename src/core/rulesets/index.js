@@ -6,10 +6,11 @@
 import coc7 from './coc7.js';
 import dnd5e from './dnd5e.js';
 import daggerheart from './daggerheart.js';
+import huazhu from './huazhu/index.js';
 
-export const RULESETS = { coc7, dnd5e, daggerheart };
+export const RULESETS = { coc7, dnd5e, daggerheart, huazhu };
 
-export const RULESET_LIST = [coc7, dnd5e, daggerheart];
+export const RULESET_LIST = [coc7, dnd5e, daggerheart, huazhu];
 
 export function getRuleset(id) {
   return RULESETS[id] || coc7;

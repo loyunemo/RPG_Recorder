@@ -1,8 +1,8 @@
 {
-  "name": "random-walking",
-  "version": "0.1.0",
+  "name": "rpg-recorder",
+  "version": "0.2.0",
   "private": true,
-  "description": "跑团记录系统 — 骰子判定 · 事件日志 · 角色卡面板（COC 7e / DND 5e / 匕首心）",
+  "description": "跑团记录系统 — 多人牌桌 · 骰子判定 · 战斗追踪 · 事件日志 · 角色卡（COC 7e / DND 5e / 匕首心 / 华渚）",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
@@ -11,6 +11,8 @@
     "serve": "node server/server.cjs",
     "test": "node tests/run.js",
     "test:smoke": "node tests/smoke.js",
+    "test:multiplayer": "node tests/multiplayer.js",
+    "build:huazhu": "node scripts/build-huazhu-data.cjs",
     "seed": "node scripts/seed-demo.cjs"
   },
   "devDependencies": {

@@ -3,22 +3,42 @@
  * 三套规则把「当前生命值」存在不同字段里，这里统一收口。
  */
 
-/** 把「当前值」写回对应系统的存储位置 */
+/**
+ * 把「当前值」写回对应系统的存储位置。
+ *
+ * 四套规则把当前生命值存在完全不同的地方，必须逐一套准：
+ *   COC    data.state.hp
+ *   DND    data.combat.hp
+ *   匕首心  data.hpMarked（记录「已标记几格」，当前值要反算）
+ *   华渚   同匕首心
+ * 判断依据是字段是否存在，而不是规则 id —— 这样玩家自建的旧角色卡也能兼容。
+ */
 export function setTrackValue(data, key, current) {
   switch (key) {
     case 'hp':
       if (data.state) data.state.hp = current;
-      else data.combat.hp = current;
+      else if (data.combat) data.combat.hp = current;
+      else data.hpMarked = Math.max(0, (data.hpMax ?? 6) - current);
       break;
-    case 'mp': data.state.mp = current; break;
-    case 'san': data.state.san = current; break;
+    case 'mp':
+      if (data.state) data.state.mp = current;
+      break;
+    case 'san':
+      if (data.state) data.state.san = current;
+      break;
     case 'luck':
       if (data.state) data.state.luck = current;
-      else data.luck = current;
+      else if ('luck' in data) data.luck = current;
       break;
-    case 'tempHp': data.combat.tempHp = current; break;
-    case 'stress': data.stressMarked = (data.stressMax ?? 6) - current; break;
-    case 'armorSlots': data.armorMarked = (data.armorSlotsMax ?? 0) - current; break;
+    case 'tempHp':
+      if (data.combat) data.combat.tempHp = current;
+      break;
+    case 'stress':
+      data.stressMarked = Math.max(0, (data.stressMax ?? 6) - current);
+      break;
+    case 'armorSlots':
+      data.armorMarked = Math.max(0, (data.armorSlotsMax ?? 0) - current);
+      break;
     case 'hope': data.hope = current; break;
     case 'fear': data.fear = current; break;
     default: break;

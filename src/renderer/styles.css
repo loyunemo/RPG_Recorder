@@ -117,6 +117,7 @@ button { cursor: pointer; }
 .badge.coc7 { background: #2c4436; color: #9fd9b6; }
 .badge.dnd5e { background: #46282a; color: #f0a9a4; }
 .badge.daggerheart { background: #362c4d; color: #c3aef0; }
+.badge.huazhu { background: #463a20; color: #e8cf94; }
 
 .muted { color: var(--muted); }
 .dim { color: var(--text-dim); }

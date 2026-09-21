@@ -5,7 +5,7 @@
  * 所有写盘都经过这里，保证「每一次判定、每一次改卡都进日志」这条铁律不被绕过。
  */
 
-import { call, platform } from './platform.js';
+import { call, platform, subscribe, connectStream, tableAction, joinTable, getPlayerId } from './platform.js';
 import { h, render, toast, confirmDialog, debounce, clear } from './util.js';
 import { RULESET_LIST, getRuleset } from '../core/rulesets/index.js';
 import { rollExpr, DiceError } from '../core/dice.js';
@@ -16,6 +16,7 @@ import { renderSheetView } from './views/sheet.js';
 import { renderNotesView } from './views/notes.js';
 import { renderLogView } from './views/log.js';
 import { renderCombatView } from './views/combat.js';
+import { renderJoinView } from './views/join.js';
 import { openNewCampaignDialog, openNewCharacterDialog } from './views/dialogs.js';
 import { openHelpDialog } from './views/help.js';
 
@@ -44,11 +45,34 @@ export const state = {
   logFilter: { types: [], search: '' },
   stats: null,
   booted: false,
+
+  /* ── 多人牌桌 ── */
+  /** 是否停在「加入牌桌」界面 */
+  needsJoin: false,
+  /** 自己的牌桌身份：{ name, role, characterIds } */
+  participant: null,
+  /** 在线玩家列表 */
+  presence: [],
+  /** 座位表：playerId -> { name, characterIds } */
+  seats: {},
+  /** 实时连接状态 */
+  connection: 'offline',
+  /** 牌桌连接信息（开桌后由服务端返回） */
+  table: { open: false, joinUrl: null, port: null },
 };
 
 export const ruleset = () => getRuleset(state.campaign?.system || 'coc7');
 export const selectedCharacter = () =>
   state.characters.find(c => c.id === state.selectedCharacterId) || null;
+
+/** 主持人视角？决定界面上哪些操作可见 */
+export const isGm = () => platform.isGm;
+
+/** 这个角色卡是否归我管（主持人管全部） */
+export function canEditCharacter(id) {
+  if (platform.isGm) return true;
+  return (state.participant?.characterIds || []).includes(id);
+}
 
 /** 掷骰统一从这里取随机源：每次独立种子，日志可复现 */
 export const freshRng = () => new RNG(newSeed());
@@ -56,6 +80,43 @@ export const freshRng = () => new RNG(newSeed());
 /* ────────────────────────────── 启动 ────────────────────────────── */
 
 async function boot() {
+  // 浏览器模式下先问服务端：牌桌开了没、我有没有有效令牌
+  if (platform.mode === 'browser') {
+    const status = await tableAction('status').catch(() => ({ open: false }));
+    platform.tableOpen = !!status.open;
+    state.table = { ...state.table, open: !!status.open, joinUrl: status.joinUrl };
+    state.presence = status.presence || [];
+
+    if (status.open) {
+      // 有令牌就试着用一下，失效则回到加入界面
+      let valid = false;
+      try {
+        await call('stats', { cid: status.campaignId });
+        valid = true;
+      } catch { valid = false; }
+
+      if (!valid) {
+        state.needsJoin = true;
+        state.booted = true;
+        renderAll();
+        return;
+      }
+      platform.role = 'player';
+      if (getPlayerId() && status.presence) {
+        const me = status.presence.find(p => p.playerId === getPlayerId());
+        if (me) state.participant = { name: me.name, role: 'player', characterIds: me.characterIds };
+      }
+      state.campaigns = await call('listCampaigns', {});
+      await openCampaign(status.campaignId || state.campaigns[0]?.id);
+      state.booted = true;
+      attachSync();
+      connectStream();
+      renderAll();
+      return;
+    }
+    // 牌桌没开 + 能访问 = 本机主持人，走单机流程
+  }
+
   state.campaigns = await call('listCampaigns', {});
   const last = localStorage.getItem('rw:lastCampaign');
   if (last && state.campaigns.some(c => c.id === last)) {
@@ -64,7 +125,131 @@ async function boot() {
     await openCampaign(state.campaigns[0].id);
   }
   state.booted = true;
+  if (platform.mode === 'electron') attachSync();
   renderAll();
+}
+
+/* ────────────────────────── 实时同步 ────────────────────────── */
+
+let syncAttached = false;
+
+function attachSync() {
+  if (syncAttached) return;
+  syncAttached = true;
+  subscribe(handleSync);
+}
+
+/**
+ * 处理服务端推送。
+ *
+ * 策略：事件直接并入列表（追加式，服务端已盖章）；其余变更走「失效重取」，
+ * 因为数据量很小，重取比在各处维护合并逻辑更不容易出错。
+ */
+async function handleSync(msg) {
+  const { type, payload } = msg;
+
+  switch (type) {
+    case 'connection':
+      state.connection = payload.state;
+      renderTopbar();
+      break;
+
+    case 'presence':
+      state.presence = payload || [];
+      renderSidebar();
+      renderTopbar();
+      break;
+
+    case 'events': {
+      const incoming = payload?.events || [];
+      const seen = new Set(state.events.map(e => e.id));
+      const fresh = incoming.filter(e => !seen.has(e.id));
+      if (fresh.length) {
+        state.events = state.events.concat(fresh);
+        renderLogPanel();
+      }
+      // 本机掷骰后 lastRoll 已由本地逻辑处理，这里只提示别人的
+      if (payload?.by && payload.by !== state.participant?.name && !platform.isGm) {
+        const roll = fresh.find(e => e.type === 'roll');
+        if (roll) toast(`${payload.by}：${roll.title}`);
+      }
+      break;
+    }
+
+    case 'character': {
+      const c = payload?.character;
+      if (!c) break;
+      const idx = state.characters.findIndex(x => x.id === c.id);
+      if (idx >= 0) state.characters[idx] = c;
+      else state.characters.push(c);
+      renderSidebar();
+      if (state.tab === 'sheet' && state.selectedCharacterId === c.id) renderMain();
+      break;
+    }
+
+    case 'combat':
+      if (payload?.combat) {
+        state.combat = { ...emptyCombat(), ...payload.combat };
+        if (state.tab === 'combat') renderMain();
+      }
+      break;
+
+    case 'changed':
+      await refreshFromServer(payload?.what);
+      break;
+
+    case 'closed':
+      toast('主持人关闭了牌桌');
+      state.connection = 'offline';
+      break;
+
+    case 'hello':
+      applySnapshot(payload);
+      break;
+
+    default:
+      break;
+  }
+}
+
+/** 全量快照（刚连上时服务端会推一次） */
+function applySnapshot(snap) {
+  if (!snap) return;
+  state.participant = { ...snap.participant, role: snap.role };
+  state.seats = snap.seats || {};
+  state.presence = snap.presence || [];
+  if (snap.combat) state.combat = { ...emptyCombat(), ...snap.combat };
+  if (snap.characters) state.characters = snap.characters;
+  if (snap.sessions?.sessions) {
+    state.sessions = snap.sessions.sessions;
+    state.activeSessionId = snap.sessions.activeSessionId;
+  }
+  if (snap.events) state.events = snap.events;
+  state.connection = 'online';
+  renderAll();
+}
+
+async function refreshFromServer(what) {
+  if (!state.campaign) return;
+  try {
+    if (what === 'sessions' || what === 'state') {
+      const data = await call('listSessions', { cid: state.campaign.id });
+      state.sessions = data.sessions || [];
+      state.activeSessionId = data.activeSessionId;
+      renderTopbar();
+    }
+    if (what === 'characters') {
+      state.characters = await call('listCharacters', { cid: state.campaign.id });
+      renderSidebar();
+      if (state.tab === 'sheet') renderMain();
+    }
+    if (what === 'campaign') {
+      state.campaign = await call('getCampaign', { cid: state.campaign.id });
+      renderAll();
+    }
+  } catch (err) {
+    console.warn('[sync] 刷新失败：', err.message);
+  }
 }
 
 export async function openCampaign(cid) {
@@ -371,6 +556,15 @@ export async function saveCharacterNow(mutate, opts = {}) {
 /* ────────────────────────────── 渲染 ────────────────────────────── */
 
 export function renderAll() {
+  // 需要加入牌桌时，先给玩家一个加入界面
+  if (state.needsJoin) {
+    document.getElementById('sidebar').style.display = 'none';
+    document.getElementById('logpanel').style.display = 'none';
+    renderTopbar();
+    renderMain();
+    return;
+  }
+
   // 没有战役时收起左右面板，让欢迎页占满窗口
   const hasCampaign = !!state.campaign;
   document.getElementById('sidebar').style.display = hasCampaign ? '' : 'none';
@@ -385,9 +579,11 @@ export function renderAll() {
 function renderTopbar() {
   const bar = document.getElementById('topbar');
 
-  if (!state.campaigns.length) {
+  if (!state.campaigns.length && !state.needsJoin) {
     render(bar,
       h('div.brand', {}, h('span.die', {}, '🎲'), '跑团记录系统'),
+      h('div.spacer'),
+      tableControl(),
     );
     return;
   }
@@ -419,33 +615,136 @@ function renderTopbar() {
     h('div.brand', {}, h('span.die', {}, '🎲'), '跑团记录系统'),
     h('div', { style: { width: '1px', height: '22px', background: 'var(--border)' } }),
     campaignSelect,
-    h('button.btn.sm', { onclick: newCampaignFlow, title: '新建战役' }, '＋ 战役'),
+    platform.isGm ? h('button.btn.sm', { onclick: newCampaignFlow, title: '新建战役' }, '＋ 战役') : null,
     sessionSelect,
-    h('button.btn.sm', {
-      title: '开始新场次',
-      onclick: async () => {
-        const s = await call('createSession', { cid: state.campaign.id, payload: {} });
-        const data = await call('listSessions', { cid: state.campaign.id });
-        state.sessions = data.sessions;
-        state.activeSessionId = s.id;
-        await reloadEvents();
-        renderTopbar();
-        toast(`开始「${s.name}」`);
-      },
-    }, '＋ 场次'),
+    platform.isGm
+      ? h('button.btn.sm', {
+        title: '开始新场次',
+        onclick: async () => {
+          const s = await call('createSession', { cid: state.campaign.id, payload: {} });
+          const data = await call('listSessions', { cid: state.campaign.id });
+          state.sessions = data.sessions;
+          state.activeSessionId = s.id;
+          await reloadEvents();
+          renderTopbar();
+          toast(`开始「${s.name}」`);
+        },
+      }, '＋ 场次')
+      : null,
     h('span.badge.' + rs.id, {}, rs.short),
 
     h('div.spacer'),
 
+    tableControl(),
     h('button.btn.sm.ghost', { onclick: () => openHelpDialog() }, '骰式帮助'),
-    h('button.btn.sm.ghost', {
-      title: platform.info.dataDir,
-      onclick: async () => { await call('openDataDir', {}); },
-    }, '📁 数据目录'),
+    platform.isGm
+      ? h('button.btn.sm.ghost', {
+        title: platform.info.dataDir,
+        onclick: async () => { await call('openDataDir', {}); },
+      }, '📁 数据目录')
+      : null,
     h('button.btn.sm', { onclick: exportFlow }, '导出复盘'),
     h('span.tiny.muted', { title: `运行模式：${platform.mode}` },
-      platform.mode === 'electron' ? '桌面版' : '浏览器版'),
+      platform.isGm ? '主持人' : (state.participant?.name || '玩家')),
   );
+}
+
+/* ────────────────────────── 牌桌控制条 ────────────────────────── */
+
+function tableControl() {
+  const t = state.table || {};
+
+  // 玩家：只显示自己的身份与连接状态
+  if (!platform.isGm) {
+    return h('div.row', { style: { gap: '6px', flex: '0 0 auto' } },
+      h('span.chip', { style: { cursor: 'default' } },
+        `👤 ${state.participant?.name || '玩家'}`),
+      h('span.chip', {
+        style: { cursor: 'default' },
+        title: { online: '已连接', reconnecting: '连接中断，正在重连', offline: '未连接' }[state.connection],
+      },
+        { online: '● 在线', reconnecting: '◌ 重连中', offline: '○ 离线' }[state.connection] || '○ 离线'),
+    );
+  }
+
+  // 主持人：开桌 / 关桌
+  if (t.open) {
+    const online = (state.presence || []).filter(p => p.online).length;
+    return h('div.row', { style: { gap: '6px', flex: '0 0 auto' } },
+      h('button.btn.sm.primary', {
+        title: '点击复制玩家连接地址',
+        onclick: async () => {
+          try {
+            await navigator.clipboard.writeText(t.joinUrl);
+            toast('连接地址已复制，发给玩家即可');
+          } catch {
+            toast(t.joinUrl);
+          }
+        },
+      }, `🌐 牌桌已开 · ${online} 人在线`),
+      h('button.btn.sm', { onclick: closeTableFlow, title: '关闭牌桌' }, '关桌'),
+    );
+  }
+
+  return h('button.btn.sm', {
+    title: '开启牌桌，让玩家用浏览器加入',
+    onclick: openTableFlow,
+  }, '🌐 开启牌桌');
+}
+
+async function openTableFlow() {
+  if (!state.campaign) { toast('请先创建或打开一个战役', true); return; }
+  try {
+    const res = await tableAction('open', {
+      campaignId: state.campaign.id,
+      gmName: '主持人',
+    });
+    state.table = {
+      open: true,
+      joinUrl: res.joinUrl,
+      port: res.port,
+      lanAddress: res.lanAddress,
+    };
+    state.connection = 'online';
+    connectStream();
+    const online = h('div', { style: { fontFamily: 'var(--mono)', fontSize: '15px', margin: '10px 0' } },
+      res.joinUrl || '');
+    showInfoModal('牌桌已开启', [
+      '把下面这个地址发给玩家，他们用手机或电脑的浏览器打开即可加入：',
+      online,
+      '玩家加入后需要选择自己的角色卡。你和他们的掷骰、战斗、笔记会实时同步。',
+      `仅限同一局域网。数据仍然保存在你自己的磁盘上（${platform.info.dataDir}）。`,
+    ]);
+    renderAll();
+  } catch (err) {
+    toast(`开启牌桌失败：${err.message}`, true);
+  }
+}
+
+async function closeTableFlow() {
+  const ok = await confirmDialog('关闭牌桌', '玩家会断开连接。确认关闭吗？', '关闭');
+  if (!ok) return;
+  await tableAction('close', {});
+  state.table = { open: false, joinUrl: null };
+  state.presence = [];
+  state.connection = 'offline';
+  renderAll();
+  toast('牌桌已关闭');
+}
+
+/** 简单的信息弹窗 */
+function showInfoModal(title, paragraphs) {
+  const root = document.getElementById('modal-root');
+  const close = () => render(root);
+  const mask = h('div.modal-mask', { onclick: (e) => { if (e.target === mask) close(); } },
+    h('div.modal', {},
+      h('h2', {}, title),
+      ...paragraphs.map(p => (typeof p === 'string'
+        ? h('p', { style: { margin: '8px 0', lineHeight: 1.7 } }, p)
+        : p)),
+      h('div.modal-foot', {}, h('button.btn.primary', { onclick: close }, '知道了')),
+    ));
+  render(root, mask);
 }
 
 function renderSidebar() {
@@ -475,7 +774,7 @@ function renderSidebar() {
     body.appendChild(list);
   }
 
-  // 底部：战役统计
+  // 底部：在线玩家 + 战役统计
   const rs = ruleset();
   const statLine = state.stats
     ? `事件 ${state.stats.events} · 角色 ${state.stats.characters} · 场次 ${state.stats.sessions}`
@@ -487,11 +786,35 @@ function renderSidebar() {
       fontSize: '11px', color: 'var(--muted)',
     },
   },
+    state.table?.open ? presenceBlock() : null,
     h('div', {}, h('span.badge.' + rs.id, {}, rs.short), ' ', state.campaign.name),
     h('div.mono', { style: { marginTop: '3px' } }, statLine),
   );
 
   render(side, header, body, foot);
+}
+
+/** 谁在线、各自身上有哪些角色卡 */
+function presenceBlock() {
+  const online = state.presence.filter(p => p.online);
+  const offline = state.presence.filter(p => !p.online);
+  const nameOf = (id) => state.characters.find(c => c.id === id)?.name || '？';
+
+  return h('div', { style: { marginBottom: '9px', paddingBottom: '9px', borderBottom: '1px solid var(--border-soft)' } },
+    h('div', { style: { letterSpacing: '.06em', marginBottom: '5px' } },
+      `在线 ${online.length} 人`),
+    ...online.map(p => h('div.row', { style: { gap: '5px', alignItems: 'baseline' } },
+      h('span', { style: { color: 'var(--ok)' } }, '●'),
+      h('span', { style: { color: 'var(--text-dim)' } }, p.name),
+      h('span.mono', { style: { fontSize: '10px', marginLeft: 'auto' } },
+        (p.characterIds || []).map(nameOf).join('、') || '未选角色'),
+    )),
+    ...offline.map(p => h('div.row', { style: { gap: '5px', alignItems: 'baseline', opacity: .5 } },
+      h('span', {}, '○'),
+      h('span', {}, p.name),
+      h('span.mono', { style: { fontSize: '10px', marginLeft: 'auto' } }, '离线'),
+    )),
+  );
 }
 
 function pcCard(c) {
@@ -538,6 +861,13 @@ function describeCharacter(c) {
 
 function renderMain() {
   const main = document.getElementById('main');
+
+  if (state.needsJoin) {
+    const view = h('div.tabview');
+    render(main, view);
+    renderJoinView(view, app);
+    return;
+  }
 
   if (!state.campaign) {
     render(main, welcomeScreen());

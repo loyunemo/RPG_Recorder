@@ -801,11 +801,289 @@ test('匕首心用 1d20 + 敏捷属性', () => {
   assert.equal(inst.mod, -1);
 });
 
+/* ══════════════════════════ 华渚框架 ══════════════════════════ */
+
+group('华渚框架数据完整性');
+
+const HZ = (await import('../src/core/rulesets/huazhu/index.js')).default;
+
+test('13 个法门全部提取到位', () => {
+  assert.equal(HZ.classes.length, 13, `实际 ${HZ.classes.length} 个`);
+  const names = HZ.classes.map(c => c.name);
+  for (const n of ['侠义', '戎武', '奇门', '医道', '结阵', '佛法', '五行', '剑修', '丹术', '行御', '匿影', '文韬', '阴诡']) {
+    assert.ok(names.includes(n), `缺少法门：${n}`);
+  }
+});
+
+test('每个法门都有领域 / 闪避 / 生命点，且都是数字', () => {
+  for (const c of HZ.classes) {
+    assert.ok(c.domain, `${c.name} 缺领域`);
+    assert.equal(typeof c.evasion, 'number', `${c.name} 闪避不是数字`);
+    assert.equal(typeof c.hp, 'number', `${c.name} 生命点不是数字`);
+    assert.ok(c.evasion > 0 && c.evasion < 30, `${c.name} 闪避值异常：${c.evasion}`);
+  }
+});
+
+test('55 个子职业，每个都有宗门性质 / 施法属性 / 初始物品', () => {
+  const subs = HZ.classes.flatMap(c => c.subclasses);
+  assert.equal(subs.length, 55, `实际 ${subs.length} 个`);
+  for (const s of subs) {
+    assert.ok(s.name, '子职业缺名字');
+    assert.ok(s.sectNature, `${s.name} 缺宗门性质`);
+    assert.ok(s.spellcastTrait, `${s.name} 缺施法属性`);
+    assert.ok(s.startingItems, `${s.name} 缺初始物品`);
+  }
+});
+
+test('每条子职业特性都带基石/专精/大师档位', () => {
+  const TIERS = new Set(['基石特性', '专精特性', '大师特性']);
+  let total = 0;
+  for (const c of HZ.classes) {
+    for (const s of c.subclasses) {
+      assert.ok(s.features.length > 0, `${s.name} 没有任何特性`);
+      for (const f of s.features) {
+        total++;
+        assert.ok(TIERS.has(f.tier), `${s.name} 的【${f.name}】档位异常：「${f.tier}」`);
+      }
+    }
+  }
+  assert.ok(total > 300, `特性总数偏少：${total}`);
+});
+
+test('领域 15 个、领域卡 315 张，且卡片都能对应到领域', () => {
+  assert.equal(HZ.domains.length, 15);
+  assert.equal(HZ.domainCards.length, 315);
+  const ids = new Set(HZ.domains.map(d => d.id));
+  for (const card of HZ.domainCards) {
+    assert.ok(ids.has(card.domain), `领域卡「${card.name}」指向了不存在的领域：${card.domain}`);
+  }
+});
+
+test('正道 12 / 邪道 3', () => {
+  const zheng = HZ.domains.filter(d => d.path === '正道').length;
+  const xie = HZ.domains.filter(d => d.path === '邪道').length;
+  assert.equal(zheng, 12, `正道实际 ${zheng}`);
+  assert.equal(xie, 3, `邪道实际 ${xie}`);
+});
+
+test('种族 27、社群 15', () => {
+  assert.equal(HZ.ancestries.length, 27);
+  assert.equal(HZ.communities.length, 15);
+});
+
+test('种族特性成对出现，不可扮演的种族被标注', () => {
+  for (const a of HZ.ancestries) {
+    assert.equal(a.traits.length, 2, `${a.name} 的特性不是 2 条`);
+  }
+  assert.ok(HZ.ancestries.some(a => a.playable === false), '应至少有一个不可扮演种族');
+});
+
+test('九玄技 9 项、位阶 5 级', () => {
+  assert.equal(HZ.mechanics.nineMysteries.length, 9);
+  assert.equal(HZ.mechanics.tiers.length, 5);
+});
+
+group('华渚机制');
+
+test('位阶由等级推导', () => {
+  assert.equal(HZ.tierFor(1), '启微境');
+  assert.equal(HZ.tierFor(3), '贯枢境');
+  assert.equal(HZ.tierFor(6), '栖真境');
+  assert.equal(HZ.tierFor(9), '凌宸境');
+  assert.equal(HZ.tierFor(10), '陆地神仙境');
+});
+
+test('位阶对越界等级不崩', () => {
+  assert.ok(HZ.tierFor(0));
+  assert.ok(HZ.tierFor(99));
+  assert.ok(HZ.tierFor(undefined));
+});
+
+test('声望档位按正负区分', () => {
+  assert.match(HZ.reputationBand(3), /善/);
+  assert.match(HZ.reputationBand(-3), /恶/);
+  assert.equal(HZ.reputationBand(0), '籍籍无名');
+});
+
+test('新建角色卡带有华渚特有字段', () => {
+  const d = HZ.createDefault('测试');
+  assert.ok(d.className, '应带默认法门');
+  assert.ok(d.domain, '应带领域');
+  assert.equal(typeof d.reputation, 'number');
+  assert.ok(d.daoHeart, '应带道心经历');
+  assert.ok(Array.isArray(d.nineMysteries));
+  assert.ok(Array.isArray(d.domainCards));
+});
+
+test('派生数值含华渚专属项', () => {
+  const data = HZ.createDefault('测试');
+  data.level = 6;
+  data.reputation = 4;
+  const d = HZ.derive(data);
+  const keys = d.stats.map(s => s.key);
+  for (const k of ['tier', 'domain', 'sectNature', 'spellcastTrait', 'reputation', 'daoHeart', 'mysteries']) {
+    assert.ok(keys.includes(k), `派生数值缺少 ${k}`);
+  }
+  assert.equal(d.stats.find(s => s.key === 'tier').value, '栖真境');
+  assert.match(d.stats.find(s => s.key === 'reputation').value, /善/);
+  assert.ok(d.tracks.find(t => t.key === 'hp'), '应保留匕首心的资源轨');
+});
+
+test('道心经历作为可掷目标出现', () => {
+  const data = HZ.createDefault('测试');
+  data.daoHeart = { name: '问道', mod: -2 };
+  const groups = HZ.rollTargets(data);
+  const all = groups.flatMap(g => g.items);
+  const dh = all.find(i => i.key === 'daoheart');
+  assert.ok(dh, '道心经历应出现在判定目标里');
+  assert.equal(dh.value, -2);
+});
+
+test('判定机制沿用匕首之心：双重骰与希望恐惧', () => {
+  const data = HZ.createDefault('测试');
+  const r = HZ.roll(data, { targetLabel: '测试', targetValue: 0, difficulty: 14, hopeDie: 8, fearDie: 6 }, new RNG(newSeed()));
+  assert.equal(r.total, 14);
+  assert.equal(r.success, true);
+  assert.equal(r.duality, 'hope');
+  assert.equal(r.token, 'hope');
+});
+
+test('会心一击在华渚里同样生效', () => {
+  const data = HZ.createDefault('测试');
+  const r = HZ.roll(data, { targetLabel: '测试', targetValue: 0, difficulty: 30, hopeDie: 7, fearDie: 7 }, new RNG(newSeed()));
+  assert.equal(r.critical, true);
+  assert.equal(r.success, true);
+});
+
+test('伤害阈值机制沿用匕首之心', () => {
+  const data = HZ.createDefault('测试');
+  data.majorThreshold = 6; data.severeThreshold = 13;
+  data.armorScore = 3; data.armorSlotsMax = 3; data.armorMarked = 0;
+  assert.equal(HZ.resolveDamage(data, { total: 20, markArmor: false }).severity, 3);
+  assert.equal(HZ.resolveDamage(data, { total: 20, markArmor: true }).severity, 2);
+});
+
+test('华渚与匕首心在判定上完全一致（同种子同结果）', () => {
+  const seed = newSeed();
+  const hz = HZ.createDefault('x');
+  const dh = daggerheart.createDefault('x');
+  const req = { targetLabel: '对照', targetValue: 1, difficulty: 12 };
+  const a = HZ.roll(hz, req, new RNG(seed));
+  const b = daggerheart.roll(dh, req, new RNG(seed));
+  assert.equal(a.total, b.total, '同一套判定机制应给出相同结果');
+  assert.equal(a.critical, b.critical);
+});
+
+test('领域卡按领域筛选可用', () => {
+  const zhenwu = HZ.cardsOfDomain('zhenwu');
+  assert.ok(zhenwu.length > 0, '真武领域应有卡');
+  assert.ok(zhenwu.every(c => c.domain === 'zhenwu'));
+});
+
+test('法门子职业查询可用', () => {
+  assert.ok(HZ.subclassesOf('侠义').length > 0);
+  assert.deepEqual(HZ.subclassesOf('不存在的法门'), []);
+});
+
+test('装备表保留了原名以便反查基础数值', () => {
+  assert.ok(HZ.equipment.weapons.length > 0);
+  const w = HZ.equipment.weapons[0];
+  assert.ok(w.name, '应有华渚名');
+  assert.ok(w.originalName, '应保留官方中文原名');
+});
+
+test('装备数值已从基础规则补齐（武器 64 / 副武器 9 / 护甲 17）', () => {
+  assert.equal(HZ.weapons.length, 64, `武器实际 ${HZ.weapons.length}`);
+  assert.equal(HZ.secondaryWeapons.length, 9, `副武器实际 ${HZ.secondaryWeapons.length}`);
+  assert.equal(HZ.armors.length, 17, `护甲实际 ${HZ.armors.length}`);
+});
+
+test('补出的武器数值完整且格式正确', () => {
+  for (const w of HZ.weapons) {
+    assert.ok(w.name, '武器缺名字');
+    assert.ok(w.trait, `${w.name} 缺属性`);
+    assert.ok(w.range, `${w.name} 缺射程`);
+    assert.match(w.damage, /^\d*d\d+([+-]\d+)?$/, `${w.name} 伤害格式异常：${w.damage}`);
+    assert.ok(w.burden, `${w.name} 缺负担`);
+  }
+});
+
+test('补出的护甲阈值是数字且阈值大小关系正确', () => {
+  for (const a of HZ.armors) {
+    assert.equal(typeof a.major, 'number', `${a.name} 重伤阈值不是数字`);
+    assert.equal(typeof a.severe, 'number', `${a.name} 致命阈值不是数字`);
+    assert.ok(a.severe > a.major, `${a.name} 致命阈值应大于重伤阈值`);
+    assert.ok(a.major > 0, `${a.name} 阈值异常：${a.major}`);
+    assert.equal(typeof a.score, 'number', `${a.name} 护甲分数不是数字`);
+    assert.ok(a.score > 0 && a.score <= 12, `${a.name} 护甲分数越界：${a.score}`);
+  }
+});
+
+test('护甲选择器用的是华渚护甲名，不再落到原版表', () => {
+  const names = HZ.armors.map(a => a.name);
+  assert.ok(names.includes('铁浮屠'), `应含华渚护甲名，实际样例：${names.slice(0, 5).join('、')}`);
+  assert.ok(!names.includes('皮甲'), '不应再出现匕首之心原版护甲名');
+});
+
+test('带闪避修正的护甲被正确识别', () => {
+  const withMod = HZ.armors.filter(a => a.evasion !== 0);
+  assert.ok(withMod.length >= 1, '应至少有一件护甲带闪避修正');
+  for (const a of withMod) {
+    assert.ok([-2, -1, 1, 2].includes(a.evasion), `${a.name} 闪避修正异常：${a.evasion}`);
+  }
+});
+
+test('护甲阈值与匕首之心基础表对齐（抽查已知条目）', () => {
+  const byName = new Map(HZ.armors.map(a => [a.name, a]));
+
+  // 铁浮屠 ← Savior Chainmail，18/48 分 8，且是唯一带闪避修正的一件。
+  // 提取时这里出过一次 bug：特性原文是 "-1 to all character traits and Evasion"，
+  // 按 "to Evasion" 匹配会漏掉，导致闪避修正被写成 0。留作回归测试。
+  const iron = byName.get('铁浮屠');
+  assert.ok(iron, '应存在「铁浮屠」');
+  assert.equal(iron.major, 18);
+  assert.equal(iron.severe, 48);
+  assert.equal(iron.score, 8);
+  assert.equal(iron.evasion, -1, '救世主锁子甲的闪避修正是 −1，曾被漏掉');
+
+  // 玄铁锁甲 ← Elundrian Chain Armor
+  const chain = byName.get('玄铁锁甲');
+  assert.ok(chain);
+  assert.equal(chain.major, 9);
+  assert.equal(chain.severe, 21);
+});
+
+test('华渚护甲覆盖 2~4 阶，且阈值随阶递增', () => {
+  const tiers = new Set(HZ.armors.map(a => a.tier));
+  assert.ok(tiers.has(2) && tiers.has(3) && tiers.has(4), `阶位覆盖异常：${[...tiers].join(',')}`);
+
+  const byTier = (t) => HZ.armors.filter(a => a.tier === t).map(a => a.major);
+  const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  assert.ok(avg(byTier(4)) > avg(byTier(2)), '4 阶护甲的重伤阈值平均应高于 2 阶');
+});
+
+test('武器数值与官方中文规则书样例一致', () => {
+  const byName = new Map(HZ.weapons.map(w => [w.name, w]));
+  // 长刀 ← Broadsword：敏捷 / 近战 / 1d8 / 单手
+  const sabre = byName.get('长刀');
+  assert.ok(sabre, '应存在「长刀」');
+  assert.equal(sabre.trait, '敏捷');
+  assert.equal(sabre.range, '近战');
+  assert.equal(sabre.damage, '1d8');
+  assert.equal(sabre.burden, '单手');
+
+  // 重剑 ← Greatsword：力量 / 近战 / 1d10+3 / 双手
+  const gs = byName.get('重剑');
+  assert.ok(gs, '应存在「重剑」');
+  assert.equal(gs.damage, '1d10+3');
+  assert.equal(gs.burden, '双手');
+});
+
 /* ══════════════════════════ 规则集接口一致性 ══════════════════════════ */
 
 group('规则集接口一致性');
 
-for (const id of ['coc7', 'dnd5e', 'daggerheart']) {
+for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
   test(`${id}：新建角色 → 派生 → 掷骰全流程`, () => {
     const rs = getRuleset(id);
     const data = rs.createDefault('测试角色');

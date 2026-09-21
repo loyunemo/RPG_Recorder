@@ -203,6 +203,84 @@ store.appendEvents(dh.id, dhSession.id, [{
   detail: '凌晨三刻。敲击声又响起，这次是七下。莉安举着火把走到门后——门缝里塞进来一片湿漉漉的、覆着青苔的鳞片。',
 }]);
 
+/* ── 华渚（匕首之心扩展） ── */
+
+const hz = store.createCampaign({
+  name: '华渚·问道',
+  system: 'huazhu',
+  description: '修真与武道并存的东方大陆。一桩灭门案把你们引向昆仑山脚下的废弃道观。',
+});
+const hzSession = store.createSession(hz.id, { name: '第一幕：青石镇的血案' });
+
+const hzData = (() => {
+  try {
+    const rules = require(path.join(__dirname, '..', 'src', 'core', 'rulesets', 'huazhu', 'data', 'classes.json'));
+    const cls = rules.classes.find(c => c.name === '剑修') || rules.classes[0];
+    const sub = cls.subclasses[0];
+    return {
+      name: '沈青崖', pronouns: '他',
+      className: cls.name, subclass: sub.name,
+      sectNature: sub.sectNature, spellcastTrait: sub.spellcastTrait,
+      domain: cls.domain, level: 3,
+      ancestry: '人类（华渚人）', community: '山野村落',
+      traits: { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 },
+      evasionBase: cls.evasion,
+      armorName: '流云衣', armorScore: 4, armorEvasion: 0,
+      majorThreshold: 9, severeThreshold: 20,
+      hpMax: cls.hp, hpMarked: 2,
+      stressMax: 6, stressMarked: 1,
+      armorSlotsMax: 4, armorMarked: 1,
+      hope: 3, fear: 2,
+      experiences: [
+        { name: '山野求生', mod: 2 }, { name: '辨认真气', mod: 2 },
+        { name: '旧案追查', mod: 2 }, { name: '', mod: 2 },
+      ],
+      daoHeart: { name: '剑心通明', mod: -2, note: '原文给的是 −2' },
+      reputation: 3,
+      nineMysteries: ['太虚引'],
+      domainCards: [],
+      weapons: [
+        { name: '青崖剑', damage: '1d10+3', trait: '敏捷', range: '近战', note: '本命剑器' },
+        { name: '袖箭', damage: '1d8', trait: '灵巧', range: '近距离', note: '暗器' },
+      ],
+      inventory: sub.startingItems || '行者行囊、干粮、火折子',
+      notes: '剑修门下弟子。',
+    };
+  } catch (err) {
+    console.warn('  （华渚数据未构建，跳过角色卡：' + err.message + '）');
+    return null;
+  }
+})();
+
+const hzChar = hzData ? store.saveCharacter(hz.id, {
+  name: hzData.name, system: 'huazhu', data: hzData,
+}, { sessionId: hzSession.id }) : null;
+
+if (hzChar) {
+  for (const r of [
+    { t: '青崖剑 攻击判定', d: '希望骰 10 + 恐惧骰 3 = 13 · 属性 +2 · 总计 15 · 难度 12 · 结果：成功（带希望）', s: 'HZ7K2M9QW4RT' },
+    { t: '知识判定（辨识古篆）', d: '希望骰 2 + 恐惧骰 11 = 13 · 属性 −1 · 总计 12 · 难度 15 · 结果：失败（带恐惧）', s: 'HZ3P8NV5YX2B' },
+    { t: '敏捷判定（反应）', d: '希望骰 6 + 恐惧骰 6 = 12 · 双骰同点：自动成功并获额外好处、+1 希望、清除 1 点压力', s: 'HZ9D4WM7UQ1E' },
+  ]) {
+    store.appendEvents(hz.id, hzSession.id, [{
+      type: 'roll', actor: hzChar.id, actorName: hzData.name,
+      title: r.t, detail: r.d, seed: r.s,
+      data: { system: 'huazhu', kind: 'check', seed: r.s },
+    }]);
+  }
+  store.appendEvents(hz.id, hzSession.id, [{
+    type: 'scene', title: '抵达青石镇',
+    detail: '镇口的告示牌上贴着三张画像，都被雨水泡烂了。客栈掌柜说，出事那晚「天上没有月亮，可井里有光」。',
+  }]);
+  store.appendEvents(hz.id, hzSession.id, [{
+    type: 'roll', actor: hzChar.id, actorName: '主持人',
+    title: '暗骰：道观里的东西是否察觉你们',
+    detail: '1d100 = 23 · 未察觉',
+    visibility: 'gm',
+    seed: 'HZSECRET0001',
+  }]);
+}
+
 /* ── 汇总 ── */
 
 console.log('\n已生成演示数据：');

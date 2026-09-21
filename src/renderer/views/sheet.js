@@ -24,10 +24,225 @@ export function renderSheetView(root, app) {
 
   if (rs.id === 'coc7') renderCoc7(container, app, char);
   else if (rs.id === 'dnd5e') renderDnd5e(container, app, char);
+  else if (rs.id === 'huazhu') renderHuazhu(container, app, char, rs);
   else renderDaggerheart(container, app, char);
 
   container.appendChild(notesCard(app, char));
   return container;
+}
+
+/* ────────────────────────── 华渚（匕首之心扩展） ────────────────────────── */
+
+/**
+ * 判定与资源机制与匕首之心完全一致，因此卡面直接复用；
+ * 这里额外挂上华渚特有的法门 / 宗门 / 位阶 / 道心 / 声望 / 九玄技 / 领域卡。
+ */
+function renderHuazhu(root, app, char, rs) {
+  renderDaggerheart(root, app, char);
+
+  const d = char.data;
+  const cls = rs.classes.find(c => c.name === d.className);
+  const subs = rs.subclassesOf(d.className);
+
+  const classSel = h('select.select', {
+    onchange: (e) => app.saveCharacterNow((data) => {
+      const next = rs.classes.find(c => c.name === e.target.value);
+      data.className = e.target.value;
+      if (next) {
+        data.evasionBase = next.evasion;
+        data.hpMax = next.hp;
+        data.domain = next.domain;
+        data.subclass = next.subclasses?.[0]?.name || '';
+        data.sectNature = next.subclasses?.[0]?.sectNature || '';
+        data.spellcastTrait = next.subclasses?.[0]?.spellcastTrait || '';
+      }
+    }),
+  }, rs.classes.map(c => h('option', { value: c.name, selected: d.className === c.name },
+    `${c.name}（${c.domain} · 闪避 ${c.evasion} / 生命 ${c.hp}）`)));
+
+  const subSel = h('select.select', {
+    disabled: !subs.length,
+    onchange: (e) => app.saveCharacterNow((data) => {
+      const s = subs.find(x => x.name === e.target.value);
+      data.subclass = e.target.value;
+      if (s) {
+        data.sectNature = s.sectNature || '';
+        data.spellcastTrait = s.spellcastTrait || '';
+      }
+    }),
+  }, subs.map(s => h('option', { value: s.name, selected: d.subclass === s.name }, s.name)));
+
+  const sub = subs.find(s => s.name === d.subclass);
+  const subDetail = sub ? h('div', {
+    style: { marginTop: '9px', display: 'flex', flexDirection: 'column', gap: '5px' },
+  },
+    h('div.row.wrap', { style: { gap: '6px' } },
+      h('span.badge', {}, sub.sectNature || '性质未标注'),
+      h('span.badge', {}, `施法属性 ${sub.spellcastTrait || '—'}`),
+      h('span.badge', {}, `额外领域 ${sub.domain || '—'}`),
+    ),
+    sub.startingItems ? h('div.tiny.muted', {}, `初始物品：${sub.startingItems}`) : null,
+    sub.description ? h('div.tiny.dim', { style: { lineHeight: 1.7 } }, sub.description) : null,
+    ...tieredFeatures(sub.features),
+  ) : null;
+
+  root.appendChild(card('法门与宗门',
+    h('div.kv-list', {},
+      kv('法门', classSel),
+      kv('宗门流派', subSel),
+      kv('领域', h('span.mono', {}, d.domain || cls?.domain || '—')),
+    ),
+    subDetail,
+  ));
+
+  /* 位阶 / 声望 / 道心 */
+  const tier = rs.tierFor(d.level);
+  root.appendChild(card('华渚机制',
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+      h('div.kv-row', {}, h('span.k', {}, '位阶'),
+        h('span.mono', { style: { fontWeight: 700 } }, `${tier}（Lv${d.level}）`)),
+
+      h('div.kv-row', {}, h('span.k', {}, '华渚声望'),
+        numInput(d.reputation ?? 0, (v) => app.saveCharacter((data) => { data.reputation = v; }), { style: { width: '80px' } }),
+        h('span.badge', {}, rs.reputationBand(d.reputation ?? 0)),
+      ),
+
+      h('div.kv-row', {}, h('span.k', {}, '道心经历'),
+        h('input.input', {
+          value: d.daoHeart?.name || '', placeholder: '道心之名',
+          onchange: (e) => app.saveCharacter((data) => { data.daoHeart.name = e.target.value; }),
+        }),
+        numInput(d.daoHeart?.mod ?? -2, (v) => app.saveCharacter((data) => { data.daoHeart.mod = v; }), { style: { width: '66px' } }),
+        h('button.btn.sm.roll', {
+          title: '用道心经历掷骰',
+          onclick: () => {
+            const dh = app.selectedCharacter()?.data.daoHeart;
+            if (dh?.name) app.performCheck({ targetLabel: `道心：${dh.name}`, targetValue: dh.mod ?? -2 });
+          },
+        }, '🎲'),
+      ),
+      h('div.tiny.muted', {},
+        '原文给道心经历的数值是 −2，且注明「无需花费希望点便可直接使用」。'
+        + '若读作笔误（应为 +2），直接改上面的数字即可。'),
+    ),
+  ));
+
+  root.appendChild(nineMysteriesCard(app, char, rs));
+  root.appendChild(domainCardsCard(app, char, rs));
+}
+
+/** 把特性按基石 / 专精 / 大师分档展示 */
+function tieredFeatures(features) {
+  const ORDER = ['基石特性', '专精特性', '大师特性'];
+  const out = [];
+  const block = (list, label) => h('div', { style: { marginTop: '7px' } },
+    label ? h('div.tiny', { style: { color: 'var(--accent)', marginBottom: '3px' } }, label) : null,
+    ...list.map(f => h('div', { style: { marginBottom: '4px' } },
+      h('span', { style: { fontWeight: 600, fontSize: '12.5px' } }, `【${f.name}】`),
+      h('span.tiny.dim', { style: { lineHeight: 1.7 } }, ` ${f.text}`),
+    )),
+  );
+  for (const tierName of ORDER) {
+    const list = (features || []).filter(f => f.tier === tierName);
+    if (list.length) out.push(block(list, tierName));
+  }
+  const untiered = (features || []).filter(f => !ORDER.includes(f.tier));
+  if (untiered.length) out.push(block(untiered, ''));
+  return out;
+}
+
+function nineMysteriesCard(app, char, rs) {
+  const d = char.data;
+  const learned = new Set(d.nineMysteries || []);
+  const list = rs.mechanics.nineMysteries || [];
+
+  const rows = list.map(m => {
+    const on = learned.has(m.name);
+    return h('div', {
+      style: {
+        background: on ? 'var(--bg-3)' : 'var(--bg-2)',
+        border: `1px solid ${on ? 'var(--accent-dim)' : 'var(--border-soft)'}`,
+        borderRadius: 'var(--radius)', padding: '8px 10px', cursor: 'pointer',
+      },
+      onclick: () => app.saveCharacterNow((data) => {
+        const arr = data.nineMysteries || [];
+        data.nineMysteries = arr.includes(m.name) ? arr.filter(x => x !== m.name) : [...arr, m.name];
+      }),
+    },
+      h('div', { style: { fontWeight: 600, fontSize: '13px' } }, on ? '✦ ' : '○ ', m.name),
+      m.text ? h('div.tiny.dim', { style: { marginTop: '3px', lineHeight: 1.7 } }, m.text) : null,
+    );
+  });
+
+  return card(`九玄技（已悟 ${learned.size} / ${list.length}）`,
+    h('div.tiny.muted', { style: { marginBottom: '8px' } }, '点击卡片切换是否已领悟'),
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } }, rows),
+  );
+}
+
+function domainCardsCard(app, char, rs) {
+  const d = char.data;
+  const owned = d.domainCards || [];
+
+  const cls = rs.classes.find(c => c.name === d.className);
+  const sub = (cls?.subclasses || []).find(s => s.name === d.subclass);
+  const usable = [cls?.domain, sub?.domain]
+    .filter(Boolean)
+    .flatMap(name => String(name).split(/[、,，]|或/).map(x => x.trim()).filter(Boolean));
+
+  const domainByName = new Map(rs.domains.map(x => [x.name, x]));
+
+  const picker = h('select.select', {
+    onchange: (e) => {
+      const cardName = e.target.value;
+      if (!cardName) return;
+      const c = rs.domainCards.find(x => x.name === cardName);
+      if (!c) return;
+      const dom = rs.domains.find(x => x.id === c.domain);
+      app.saveCharacterNow((data) => {
+        data.domainCards = [...(data.domainCards || []), {
+          name: c.name, domain: dom?.name || c.domain, level: c.level, text: c.text,
+        }];
+      });
+      e.target.value = '';
+    },
+  }, [
+    h('option', { value: '' }, '＋ 添加领域卡…'),
+    ...usable.flatMap(name => {
+      const dom = domainByName.get(name);
+      if (!dom) return [];
+      return [h('optgroup', { label: `${dom.name}（${dom.path}）` },
+        rs.domainCards
+          .filter(c => c.domain === dom.id)
+          .sort((a, b) => (a.level ?? 99) - (b.level ?? 99))
+          .map(c => h('option', { value: c.name }, `Lv${c.level ?? '?'} ${c.name}`)))];
+    }),
+  ]);
+
+  return card(`领域卡（${owned.length} 张）`,
+    h('div', { style: { marginBottom: '9px' } }, picker),
+    owned.length
+      ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+        ...owned.map((c, i) => h('div', {
+          style: {
+            background: 'var(--bg-2)', border: '1px solid var(--border-soft)',
+            borderRadius: 'var(--radius)', padding: '8px 10px',
+          },
+        },
+          h('div.row', {},
+            h('span', { style: { fontWeight: 600, fontSize: '13px' } }, c.name),
+            h('span.badge', { style: { marginLeft: '7px' } }, c.domain || ''),
+            c.level != null ? h('span.badge', { style: { marginLeft: '4px' } }, `Lv${c.level}`) : null,
+            h('div.spacer'),
+            h('button.btn.sm.ghost', {
+              onclick: () => app.saveCharacterNow((data) => { data.domainCards.splice(i, 1); }),
+            }, '✕'),
+          ),
+          c.text ? h('div.tiny.dim', { style: { marginTop: '4px', lineHeight: 1.7 } }, c.text) : null,
+        )),
+      )
+      : h('div.tiny.muted', {}, '还没有领域卡。从上方选择添加。'),
+  );
 }
 
 /* ────────────────────────── 公共部件 ────────────────────────── */

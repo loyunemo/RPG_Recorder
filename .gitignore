@@ -6,14 +6,23 @@ node_modules/
 .electron-cache/
 
 # 跑团数据：默认写在这里，包含战役、角色卡与日志
-data/
+# 必须锚定到仓库根目录，否则会连带忽略 src/core/rulesets/huazhu/data/ 里的规则数据
+/data/
 *.tmp
 
-# 开发时用到的临时目录
+# 开发与测试时用到的临时目录
 .shots/
 .smoke/
 .demo/
+.verify/
+.mp-test/
+.docx-tmp/
 *.log
+
+# 第三方原始资料：华渚框架原书著作权归作者【虚拟人】所有。
+# 本项目只提交从中提炼的派生规则数据（src/core/rulesets/huazhu/data/），
+# 不重新分发原书本身。若你有权公开它，删掉下面这行即可。
+《华渚》*.docx
 
 # 编辑器
 .vscode/
