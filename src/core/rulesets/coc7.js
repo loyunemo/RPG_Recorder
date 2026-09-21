@@ -392,20 +392,31 @@ function ageRules(age) {
   return { deductTotal: 80, target: ['str', 'con', 'dex'], app: -25, edu: 0, mov: -5, eduChecks: 4, note: '80 岁以上：力量/体质/敏捷合计 −80，外貌 −25，移动力 −5，4 次教育成长' };
 }
 
-/** 把年龄下降额度均匀摊到目标属性上（余数从第一项开始补） */
+/**
+ * 把年龄下降额度摊到目标属性上。
+ *
+ * 单项不允许降到 1 以下（规则书也要求玩家把减不动的额度分配给别的属性），
+ * 所以这里轮流各扣 1 点，见底的项跳过、额度顺延给还减得动的项。
+ * 若所有目标属性都已见底，剩余额度只能作废 —— 那是这组属性配这个年龄本就建不出来。
+ */
 function applyAge(attributes, age) {
   const rules = ageRules(age);
   const out = { ...attributes };
+
+  if (rules.app) out.app = Math.max(1, (out.app || 0) + rules.app);
+  if (rules.edu) out.edu = Math.max(1, (out.edu || 0) + rules.edu);
+
   if (rules.deductTotal > 0 && rules.target.length) {
-    const each = Math.floor(rules.deductTotal / rules.target.length);
-    let rest = rules.deductTotal - each * rules.target.length;
-    for (const key of rules.target) {
-      const take = each + (rest-- > 0 ? 1 : 0);
-      out[key] = Math.max(0, (out[key] || 0) - take);
+    let left = rules.deductTotal;
+    while (left > 0) {
+      let moved = false;
+      for (const key of rules.target) {
+        if (left <= 0) break;
+        if ((out[key] || 0) > 1) { out[key] -= 1; left -= 1; moved = true; }
+      }
+      if (!moved) break;   // 目标属性全都见底了
     }
   }
-  if (rules.app) out.app = Math.max(0, (out.app || 0) + rules.app);
-  if (rules.edu) out.edu = Math.max(0, (out.edu || 0) + rules.edu);
   return out;
 }
 

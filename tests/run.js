@@ -1337,10 +1337,20 @@ test('年龄修正按规则书的额度下降', () => {
   assert.equal((base.str - ancient.str) + (base.con - ancient.con) + (base.dex - ancient.dex), 80);
 });
 
-test('年龄修正不会把属性压成负数', () => {
+test('年龄修正不会把属性压到 1 以下', () => {
   const weak = { str: 20, con: 20, dex: 20, app: 20, pow: 40, siz: 45, int: 50, edu: 50 };
   const out = coc7.creation.attributes.applyAge(weak, 85);
-  for (const [k, v] of Object.entries(out)) assert.ok(v >= 0, `${k} 变成负数：${v}`);
+  for (const [k, v] of Object.entries(out)) assert.ok(v >= 1, `${k} 低于 1：${v}`);
+});
+
+test('年龄修正：某项见底时额度顺延给其它项', () => {
+  // 力量只有 20，吃不下 80 点里的大部分；额度应转给体质与敏捷
+  const lopsided = { str: 20, con: 90, dex: 90, app: 60, pow: 60, siz: 60, int: 60, edu: 60 };
+  const out = coc7.creation.attributes.applyAge(lopsided, 85);
+  assert.ok(out.str >= 1, `力量不应低于 1，实际 ${out.str}`);
+  const lost = (20 - out.str) + (90 - out.con) + (90 - out.dex);
+  assert.equal(lost, 80, '总额度应完整用掉');
+  assert.ok(out.con < 90 && out.dex < 90, '减不动的部分应转给其它属性');
 });
 
 test('技能点预算 = 教育×4 与智力×2', () => {
@@ -1396,13 +1406,18 @@ test('偏离掷骰范围只提醒、不阻止（年龄修正会合法下调）',
   assert.ok(!res.errors.some(e => /体型/.test(e.message)), '这种情况不该是 error');
 });
 
-test('年龄修正后的属性不会被误判为越界', () => {
-  const data = coc7.createDefault('测试');
-  data.age = 85;
-  const rolled = coc7.creation.attributes.roll(new RNG(newSeed()));
-  Object.assign(data.attributes, coc7.creation.attributes.applyAge(rolled.attributes, 85));
-  const res = coc7.creation.validate(data);
-  assert.ok(!res.errors.some(e => /超出 1~99/.test(e.message)), JSON.stringify(res.errors));
+test('年龄修正后的属性不会被误判为越界（多次随机）', () => {
+  // 这条曾经约有 25% 概率失败：极老的年龄配上很低的掷骰，
+  // 旧实现会把属性压到 0，而校验要求 ≥1 —— 车卡向导会卡在玩家无法修正的错误上。
+  for (let i = 0; i < 200; i++) {
+    const data = coc7.createDefault('测试');
+    data.age = 85;
+    const rolled = coc7.creation.attributes.roll(new RNG(newSeed()));
+    Object.assign(data.attributes, coc7.creation.attributes.applyAge(rolled.attributes, 85));
+    const res = coc7.creation.validate(data);
+    assert.ok(!res.errors.some(e => /超出 1~99/.test(e.message)),
+      `第 ${i} 次出现越界：${JSON.stringify(res.errors)}`);
+  }
 });
 
 group('车卡规则 · DND 5 版');
