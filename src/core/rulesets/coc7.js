@@ -5,6 +5,7 @@
  */
 
 import { rollPercentile } from '../dice.js';
+import { validator, roll3d6x5, roll2d6p6x5, makeBudgets } from '../creation.js';
 
 export const COC_ATTRIBUTES = [
   { key: 'str', label: '力量', abbr: 'STR' },
@@ -104,6 +105,8 @@ function createDefault(name = '新调查员') {
         return [n, v];
       })
     ),
+    /** 车卡时标记为本职技能的技能名；只有这些能吃「职业点数」 */
+    occupationSkills: [],
     weapons: [],
     gear: '',
     background: {
@@ -339,6 +342,160 @@ function initiative(data) {
   return { kind: 'static', value: data.attributes.dex, label: '按 DEX 排序' };
 }
 
+/* ────────────────────────── 车卡规则 ────────────────────────── */
+
+/** 技能初始值：用来算某个技能在车卡时「加了多少点」 */
+const SKILL_BASE = (() => {
+  const base = Object.fromEntries(COC_SKILLS.map(([n, v]) => [n, v]));
+  base['闪避'] = 25;
+  base['母语'] = 50;
+  return base;
+})();
+
+/** 规则书：职业一般提供 8 项本职技能 */
+const MAX_OCCUPATION_SKILLS = 8;
+
+/**
+ * 掷骰公式本身能出的范围。
+ * 这只是「提醒」用 —— 年龄修正会把属性压到范围以下，所以不能当硬边界。
+ */
+const ROLL_RANGE = {
+  str: [15, 90], con: [15, 90], dex: [15, 90], app: [15, 90], pow: [15, 90],
+  siz: [40, 90], int: [40, 90], edu: [40, 90],
+};
+
+/** 按规则书公式掷一整套属性 + 幸运 */
+function creationRoll(rng) {
+  return {
+    attributes: {
+      str: roll3d6x5(rng), con: roll3d6x5(rng), dex: roll3d6x5(rng),
+      app: roll3d6x5(rng), pow: roll3d6x5(rng),
+      siz: roll2d6p6x5(rng), int: roll2d6p6x5(rng), edu: roll2d6p6x5(rng),
+    },
+    luck: roll3d6x5(rng),
+  };
+}
+
+/**
+ * 年龄修正。
+ * 规则书把「年龄带来的属性下降」写成总额度，具体减哪几项由玩家分配；
+ * 这里给出总额度，并提供一份均匀分配的默认方案，玩家可以再手动调整。
+ */
+function ageRules(age) {
+  const a = Number(age) || 30;
+  if (a <= 19) return { deductTotal: 5, target: ['str', 'siz'], app: 0, edu: -5, mov: 0, eduChecks: 0, note: '15–19 岁：力量与体型合计 −5，教育 −5，幸运可重掷一次' };
+  if (a <= 39) return { deductTotal: 0, target: [], app: 0, edu: 0, mov: 0, eduChecks: 1, note: '20–39 岁：无属性下降，可做 1 次教育成长检定' };
+  if (a <= 49) return { deductTotal: 5, target: ['str', 'con', 'dex'], app: -5, edu: 0, mov: -1, eduChecks: 2, note: '40–49 岁：力量/体质/敏捷合计 −5，外貌 −5，移动力 −1，2 次教育成长' };
+  if (a <= 59) return { deductTotal: 10, target: ['str', 'con', 'dex'], app: -10, edu: 0, mov: -2, eduChecks: 3, note: '50–59 岁：力量/体质/敏捷合计 −10，外貌 −10，移动力 −2，3 次教育成长' };
+  if (a <= 69) return { deductTotal: 20, target: ['str', 'con', 'dex'], app: -15, edu: 0, mov: -3, eduChecks: 4, note: '60–69 岁：力量/体质/敏捷合计 −20，外貌 −15，移动力 −3，4 次教育成长' };
+  if (a <= 79) return { deductTotal: 40, target: ['str', 'con', 'dex'], app: -20, edu: 0, mov: -4, eduChecks: 4, note: '70–79 岁：力量/体质/敏捷合计 −40，外貌 −20，移动力 −4，4 次教育成长' };
+  return { deductTotal: 80, target: ['str', 'con', 'dex'], app: -25, edu: 0, mov: -5, eduChecks: 4, note: '80 岁以上：力量/体质/敏捷合计 −80，外貌 −25，移动力 −5，4 次教育成长' };
+}
+
+/** 把年龄下降额度均匀摊到目标属性上（余数从第一项开始补） */
+function applyAge(attributes, age) {
+  const rules = ageRules(age);
+  const out = { ...attributes };
+  if (rules.deductTotal > 0 && rules.target.length) {
+    const each = Math.floor(rules.deductTotal / rules.target.length);
+    let rest = rules.deductTotal - each * rules.target.length;
+    for (const key of rules.target) {
+      const take = each + (rest-- > 0 ? 1 : 0);
+      out[key] = Math.max(0, (out[key] || 0) - take);
+    }
+  }
+  if (rules.app) out.app = Math.max(0, (out.app || 0) + rules.app);
+  if (rules.edu) out.edu = Math.max(0, (out.edu || 0) + rules.edu);
+  return out;
+}
+
+/** 技能点预算：本职 = 教育 × 4，兴趣 = 智力 × 2 */
+function creationBudgets(data) {
+  const edu = data.attributes?.edu || 0;
+  const int = data.attributes?.int || 0;
+  const occ = new Set(data.occupationSkills || []);
+
+  let occUsed = 0;
+  let intUsed = 0;
+  for (const [name, value] of Object.entries(data.skills || {})) {
+    const gain = Math.max(0, (value || 0) - (SKILL_BASE[name] ?? 0));
+    if (occ.has(name)) occUsed += gain;
+    else intUsed += gain;
+  }
+
+  return makeBudgets([
+    { key: 'occupationPoints', label: '本职技能点', total: edu * 4, used: occUsed, hint: `教育 ${edu} × 4` },
+    { key: 'interestPoints', label: '兴趣技能点', total: int * 2, used: intUsed, hint: `智力 ${int} × 2` },
+  ]);
+}
+
+function creationValidate(data) {
+  const v = validator();
+
+  for (const a of COC_ATTRIBUTES) {
+    const val = data.attributes?.[a.key];
+    if (!Number.isFinite(val)) { v.error(`attr.${a.key}`, `${a.label}未填写`); continue; }
+    if (val < 1 || val > 99) { v.error(`attr.${a.key}`, `${a.label} ${val} 超出 1~99`); continue; }
+    // 掷骰范围只作提醒：年龄修正会合法地把属性压到范围以下
+    const [lo, hi] = ROLL_RANGE[a.key];
+    if (val < lo || val > hi) {
+      v.warn(`attr.${a.key}`, `${a.label} ${val} 不在掷骰范围 ${lo}~${hi} 内（年龄修正下调？还是手工设定？）`);
+    }
+  }
+
+  const age = Number(data.age);
+  if (!Number.isFinite(age) || age < 15 || age > 90) v.error('age', `年龄 ${data.age} 不合理（15~90）`);
+
+  const occ = data.occupationSkills || [];
+  if (occ.length > MAX_OCCUPATION_SKILLS) {
+    v.error('occupationSkills', `本职技能最多 ${MAX_OCCUPATION_SKILLS} 项，当前 ${occ.length} 项`);
+  }
+  if (!data.occupation) v.warn('occupation', '还没填写职业名');
+  if (!occ.length) v.warn('occupationSkills', '还没标记本职技能，职业点数无处可花');
+
+  const credit = data.skills?.['信用评级'];
+  if (credit != null && (credit < 0 || credit > 99)) {
+    v.error('skill.credit', `信用评级 ${credit} 超出 0~99`);
+  }
+
+  for (const b of creationBudgets(data)) {
+    if (b.over) v.error(b.key, `${b.label}超出上限：${b.used} / ${b.total}`);
+  }
+
+  return v.result;
+}
+
+export const COC_CREATION = {
+  summary: '属性按规则书公式掷骰（3d6×5 与 (2d6+6)×5），再按年龄做下降修正；'
+    + '技能点分为「本职」与「兴趣」两笔，额度分别由教育与智力决定。',
+  attributes: {
+    keys: COC_ATTRIBUTES.map(a => a.key),
+    labels: Object.fromEntries(COC_ATTRIBUTES.map(a => [a.key, `${a.label} ${a.abbr}`])),
+    min: 1,
+    max: 99,
+    methods: [{ id: 'roll', label: '按规则掷骰', hint: '力量/体质/敏捷/外貌/意志 = 3d6×5；体型/智力/教育 = (2d6+6)×5；幸运 = 3d6×5' }],
+    roll: creationRoll,
+    applyAge,
+    ageRules,
+  },
+  /** 车卡时需要玩家补充的字段 */
+  fields: [
+    { key: 'occupation', label: '职业', type: 'text', placeholder: '例如：古物学者、私家侦探' },
+    { key: 'age', label: '年龄', type: 'number', min: 15, max: 90, default: 30, hint: '年龄会带来属性下降与教育成长' },
+    { key: 'gender', label: '性别', type: 'text' },
+    { key: 'residence', label: '居住地', type: 'text' },
+  ],
+  budgets: creationBudgets,
+  validate: creationValidate,
+  /** 车卡阶段要标记本职技能 */
+  skillPick: {
+    label: '本职技能',
+    hint: `最多 ${MAX_OCCUPATION_SKILLS} 项。只有被标记的技能才能使用「职业点数」`,
+    max: MAX_OCCUPATION_SKILLS,
+    key: 'occupationSkills',
+  },
+};
+
 export default {
   id: 'coc7',
   name: '克苏鲁的呼唤 7版',
@@ -356,6 +513,7 @@ export default {
   roll,
   rollOpposed,
   initiative,
+  creation: COC_CREATION,
   buildAndDB,
   movement,
   ageModifier,

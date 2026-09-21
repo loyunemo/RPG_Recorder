@@ -40,6 +40,14 @@ export function renderSheetView(root, app) {
 
   body.appendChild(sheetHeader(app, char, rs, editable));
 
+  // 规则校验：只提示，不阻止保存 —— 主持人随时可以裁定偏离规则
+  if (editable && rs.creation?.validate) {
+    const res = rs.creation.validate(char.data);
+    if (res.errors.length || res.warnings.length) {
+      container.insertBefore(ruleCheckPanel(res), body);
+    }
+  }
+
   if (rs.id === 'coc7') renderCoc7(body, app, char);
   else if (rs.id === 'dnd5e') renderDnd5e(body, app, char);
   else if (rs.id === 'huazhu') renderHuazhu(body, app, char, rs);
@@ -50,8 +58,44 @@ export function renderSheetView(root, app) {
   return container;
 }
 
-/* ────────────────────────── 华渚（匕首之心扩展） ────────────────────────── */
+/**
+ * 对照车卡规则的校验结果面板。
+ * 这里只「提示」不「阻止」：角色卡页是自由编辑区，
+ * 主持人有权裁定偏离规则的角色（房规、剧情、临时 NPC 都需要）。
+ */
+function ruleCheckPanel(res, onFix) {
+  const box = h('div.card', {
+    style: {
+      marginBottom: '12px',
+      borderColor: res.errors.length ? '#6b3f3f' : '#6b5a2f',
+      background: res.errors.length ? '#241a1a' : '#2b2416',
+    },
+  },
+    h('h3', { style: { marginBottom: '8px' } },
+      res.errors.length ? '⚠ 偏离车卡规则' : 'ⓘ 与车卡规则略有出入',
+      h('div.spacer'),
+      h('span.tiny.muted', { style: { textTransform: 'none', letterSpacing: 0 } },
+        '仅提示，不影响保存'),
+    ),
+  );
 
+  for (const e of res.errors) {
+    box.appendChild(h('div.tiny', { style: { color: '#f0b6b2', lineHeight: 1.8 } }, `· ${e.message}`));
+  }
+  for (const w of res.warnings) {
+    box.appendChild(h('div.tiny', { style: { color: '#e3cf9a', lineHeight: 1.8 } }, `· ${w.message}`));
+  }
+
+  if (res.errors.length) {
+    box.appendChild(h('div', { style: { marginTop: '10px' } },
+      h('span.tiny.muted', {},
+        '这些是「按规则车卡」时的约束。若你是刻意如此（房规、NPC、剧情需要），忽略即可。')));
+  }
+
+  return box;
+}
+
+/* ────────────────────────── 华渚（匕首之心扩展） ────────────────────────── */
 /**
  * 判定与资源机制与匕首之心完全一致，因此卡面直接复用；
  * 这里额外挂上华渚特有的法门 / 宗门 / 位阶 / 道心 / 声望 / 九玄技 / 领域卡。

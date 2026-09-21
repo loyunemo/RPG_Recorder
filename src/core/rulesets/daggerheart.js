@@ -8,6 +8,8 @@
  * （© Critical Role, LLC.，依 Darrington Press Community Gaming License 使用）。
  */
 
+import { validator, makeBudgets } from '../creation.js';
+
 export const DH_TRAITS = [
   { key: 'agility', label: '敏捷', abbr: 'AGI' },
   { key: 'strength', label: '力量', abbr: 'STR' },
@@ -319,6 +321,112 @@ function initiative(data) {
   return { kind: 'roll', expr: '1d20', mod, label: `1d20 ${mod >= 0 ? '+' : ''}${mod}（敏捷）` };
 }
 
+/* ────────────────────────── 车卡规则 ────────────────────────── */
+
+/** 起始属性是固定的六个调整值，玩家把它们各用一次分配到六项属性上 */
+const TRAIT_SET = [2, 1, 1, 0, 0, -1];
+
+function creationBudgets(data) {
+  const level = data.level || 1;
+  const traits = DH_TRAITS.map(t => data.traits?.[t.key] ?? 0);
+  const exps = (data.experiences || []).filter(e => (e.name || '').trim());
+  const cards = data.domainCards || [];
+
+  // 起始数组要「原样用完」，所以按多重集匹配算已用个数
+  const pool = [...TRAIT_SET];
+  let matched = 0;
+  for (const v of traits) {
+    const i = pool.indexOf(v);
+    if (i >= 0) { pool.splice(i, 1); matched++; }
+  }
+
+  return makeBudgets([
+    { key: 'traitSet', label: '起始属性数组', total: 6, used: matched, unit: '项',
+      hint: `应恰好用掉 ${TRAIT_SET.map(v => (v > 0 ? `+${v}` : v)).join(' / ')} 各一次` },
+    { key: 'experiences', label: '经历', total: 2 + Math.max(0, level - 1), used: exps.length, unit: '条',
+      hint: '1 级 2 条，每条 +2；每升一级多 1 条' },
+    { key: 'domainCards', label: '领域卡', total: 2 + Math.max(0, level - 1), used: cards.length, unit: '张',
+      hint: '1 级 2 张；每升一级多 1 张' },
+  ]);
+}
+
+function creationValidate(data) {
+  const v = validator();
+
+  /* 起始数组必须恰好用完 */
+  const pool = [...TRAIT_SET];
+  for (const t of DH_TRAITS) {
+    const val = data.traits?.[t.key];
+    const i = pool.indexOf(val);
+    if (i >= 0) pool.splice(i, 1);
+  }
+  if (pool.length) {
+    v.error('traitSet', '属性分配不合法：起始数组应恰好用掉 '
+      + `${TRAIT_SET.map(x => (x > 0 ? `+${x}` : x)).join(' / ')}，还剩 `
+      + `${pool.map(x => (x > 0 ? `+${x}` : x)).join(' / ')} 没用上`);
+  }
+  for (const t of DH_TRAITS) {
+    const val = data.traits?.[t.key];
+    if (!Number.isFinite(val)) v.error(`trait.${t.key}`, `${t.label}未填写`);
+  }
+
+  /* 职业决定闪避与生命点 */
+  const cls = DH_CLASSES.find(c => c.name === data.className);
+  if (!data.className) v.error('className', '还没选择职业');
+  else if (!cls) v.warn('className', `「${data.className}」不在内置职业表里`);
+  else {
+    if (data.evasionBase !== cls.evasion) {
+      v.error('evasion', `${cls.name} 的起始闪避应为 ${cls.evasion}，当前 ${data.evasionBase}`);
+    }
+    if (data.hpMax !== cls.hp) {
+      v.error('hp', `${cls.name} 的起始生命点应为 ${cls.hp}，当前 ${data.hpMax}`);
+    }
+  }
+
+  if ((data.hope ?? 0) !== 2) v.warn('hope', `起始希望应为 2 点，当前 ${data.hope}`);
+  if ((data.stressMax ?? 6) !== 6) v.warn('stressMax', `起始压力上限应为 6，当前 ${data.stressMax}`);
+
+  if ((data.armorSlotsMax ?? 0) !== (data.armorScore ?? 0)) {
+    v.error('armorSlots', `护甲槽数量应等于护甲分数（${data.armorScore}），当前 ${data.armorSlotsMax}`);
+  }
+  if (!(data.majorThreshold > 0) || !(data.severeThreshold > data.majorThreshold)) {
+    v.error('thresholds', '伤害阈值应满足：致命阈值 > 重伤阈值 > 0');
+  }
+
+  const level = data.level || 1;
+  const exps = (data.experiences || []).filter(e => (e.name || '').trim());
+  const needExp = 2 + Math.max(0, level - 1);
+  if (exps.length < needExp) v.error('experiences', `${level} 级应有 ${needExp} 条经历，当前 ${exps.length} 条`);
+  for (const e of exps) {
+    if (e.mod !== 2) v.warn('experiences', `经历「${e.name}」的加值通常是 +2，当前 +${e.mod}`);
+  }
+
+  const needCards = 2 + Math.max(0, level - 1);
+  const cards = data.domainCards || [];
+  if (cards.length < needCards) v.error('domainCards', `${level} 级应有 ${needCards} 张领域卡，当前 ${cards.length} 张`);
+
+  return v.result;
+}
+
+export const DH_CREATION = {
+  summary: '起始六项属性从固定数组（+2 / +1 / +1 / 0 / 0 / −1）里各取一次分配；'
+    + '职业决定起始闪避与生命点，1 级带 2 条经历与 2 张领域卡，起始希望 2 点、压力上限 6 格。',
+  traits: {
+    keys: DH_TRAITS.map(t => t.key),
+    labels: Object.fromEntries(DH_TRAITS.map(t => [t.key, `${t.label} ${t.abbr}`])),
+    array: TRAIT_SET,
+  },
+  fields: [
+    { key: 'className', label: '职业', type: 'select', options: DH_CLASSES.map(c => c.name) },
+    { key: 'level', label: '等级', type: 'number', min: 1, max: 10, default: 1 },
+    { key: 'ancestry', label: '血统', type: 'text' },
+    { key: 'community', label: '社群', type: 'text' },
+  ],
+  budgets: creationBudgets,
+  validate: creationValidate,
+  traitSet: TRAIT_SET,
+};
+
 export default {
   id: 'daggerheart',
   name: '匕首心',
@@ -339,4 +447,5 @@ export default {
   resolveDamage,
   damageSeverity,
   initiative,
+  creation: DH_CREATION,
 };

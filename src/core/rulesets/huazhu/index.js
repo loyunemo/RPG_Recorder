@@ -13,6 +13,7 @@
  */
 
 import daggerheart, { DH_TRAITS, DH_TRAIT_ARRAY, damageSeverity, SEVERITY_LABEL } from '../daggerheart.js';
+import { validator, makeBudgets } from '../../creation.js';
 
 import classesData from './data/classes.gen.js';
 import ancestriesData from './data/ancestries.gen.js';
@@ -245,6 +246,168 @@ function initiative(data) {
 
 /* ────────────────────────── 导出 ────────────────────────── */
 
+/* ────────────────────────── 车卡规则 ────────────────────────── */
+
+const TRAIT_SET = DH_TRAIT_ARRAY;   // [+2, +1, +1, 0, 0, −1]
+
+/** 某个法门 + 宗门可用的领域列表 */
+function usableDomains(data) {
+  const cls = CLASS_BY_NAME.get(data.className);
+  const sub = (cls?.subclasses || []).find(s => s.name === data.subclass);
+  const list = [];
+  if (cls?.domain) list.push(...String(cls.domain).split(/[、,，]/).map(s => s.trim()).filter(Boolean));
+  // 宗门的领域有时写成「污秽或虔心」这样的二选一
+  if (sub?.domain) {
+    for (const part of String(sub.domain).split(/[、,，]|或/).map(s => s.trim()).filter(Boolean)) {
+      if (!list.includes(part)) list.push(part);
+    }
+  }
+  return list;
+}
+
+function creationBudgets(data) {
+  const level = data.level || 1;
+  const pool = [...TRAIT_SET];
+  let matched = 0;
+  for (const t of DH_TRAITS) {
+    const i = pool.indexOf(data.traits?.[t.key]);
+    if (i >= 0) { pool.splice(i, 1); matched++; }
+  }
+
+  const exps = (data.experiences || []).filter(e => (e.name || '').trim());
+  const cards = data.domainCards || [];
+  const usable = usableDomains(data);
+  const inDomain = cards.filter(c => usable.includes(c.domain)).length;
+
+  return makeBudgets([
+    { key: 'traitSet', label: '起始属性数组', total: 6, used: matched, unit: '项',
+      hint: `应恰好用掉 ${TRAIT_SET.map(v => (v > 0 ? `+${v}` : v)).join(' / ')} 各一次` },
+    { key: 'experiences', label: '经历', total: 2 + Math.max(0, level - 1), used: exps.length, unit: '条',
+      hint: '1 级 2 条，每条 +2；每升一级多 1 条' },
+    { key: 'domainCards', label: '领域卡', total: 2 + Math.max(0, level - 1), used: cards.length, unit: '张',
+      hint: usable.length ? `只能从 ${usable.join(' / ')} 两个领域里选` : '先选好法门与宗门' },
+    ...(usable.length ? [{
+      key: 'domainMatch', label: '其中属于本领域', total: cards.length || 1,
+      used: inDomain, unit: '张', hint: '带进来的卡应都来自你的可用领域',
+    }] : []),
+  ]);
+}
+
+function creationValidate(data) {
+  const v = validator();
+
+  /* 属性数组 */
+  const pool = [...TRAIT_SET];
+  for (const t of DH_TRAITS) {
+    const i = pool.indexOf(data.traits?.[t.key]);
+    if (i >= 0) pool.splice(i, 1);
+  }
+  if (pool.length) {
+    v.error('traitSet', '属性分配不合法：起始数组应恰好用掉 '
+      + `${TRAIT_SET.map(x => (x > 0 ? `+${x}` : x)).join(' / ')}，还剩 `
+      + `${pool.map(x => (x > 0 ? `+${x}` : x)).join(' / ')} 没用上`);
+  }
+  for (const t of DH_TRAITS) {
+    if (!Number.isFinite(data.traits?.[t.key])) v.error(`trait.${t.key}`, `${t.label}未填写`);
+  }
+
+  /* 法门 */
+  const cls = CLASS_BY_NAME.get(data.className);
+  if (!data.className) v.error('className', '还没选择法门');
+  else if (!cls) v.error('className', `「${data.className}」不在 13 法门之内`);
+  else {
+    if (data.evasionBase !== cls.evasion) {
+      v.error('evasion', `${cls.name} 的起始闪避应为 ${cls.evasion}，当前 ${data.evasionBase}`);
+    }
+    if (data.hpMax !== cls.hp) {
+      v.error('hp', `${cls.name} 的起始生命点应为 ${cls.hp}，当前 ${data.hpMax}`);
+    }
+    if (data.domain !== cls.domain) {
+      v.error('domain', `${cls.name} 的领域应为「${cls.domain}」，当前「${data.domain}」`);
+    }
+  }
+
+  /* 宗门（子职业） */
+  const sub = (cls?.subclasses || []).find(s => s.name === data.subclass);
+  if (!data.subclass) v.error('subclass', '还没选择宗门流派');
+  else if (cls && !sub) {
+    const names = (cls.subclasses || []).map(s => s.name);
+    v.error('subclass', `「${data.subclass}」不属于 ${cls.name}。可选：${names.join('、')}`);
+  } else if (sub) {
+    if (sub.sectNature && data.sectNature !== sub.sectNature) {
+      v.warn('sectNature', `宗门性质应为「${sub.sectNature}」，当前「${data.sectNature}」`);
+    }
+    if (sub.spellcastTrait && data.spellcastTrait !== sub.spellcastTrait) {
+      v.error('spellcastTrait', `施法属性应为「${sub.spellcastTrait}」，当前「${data.spellcastTrait}」`);
+    }
+  }
+
+  /* 领域卡必须来自可用领域 */
+  const usable = usableDomains(data);
+  const cards = data.domainCards || [];
+  if (usable.length) {
+    const bad = cards.filter(c => !usable.includes(c.domain));
+    if (bad.length) {
+      v.error('domainCards', `这些领域卡不在你的可用领域（${usable.join(' / ')}）内：`
+        + bad.map(c => `${c.name}（${c.domain}）`).join('、'));
+    }
+  }
+
+  /* 起始资源 */
+  if ((data.hope ?? 0) !== 2) v.warn('hope', `起始希望应为 2 点，当前 ${data.hope}`);
+  if ((data.stressMax ?? 6) !== 6) v.warn('stressMax', `起始压力上限应为 6，当前 ${data.stressMax}`);
+  if ((data.armorSlotsMax ?? 0) !== (data.armorScore ?? 0)) {
+    v.error('armorSlots', `护甲槽数量应等于护甲分数（${data.armorScore}），当前 ${data.armorSlotsMax}`);
+  }
+  if (!(data.majorThreshold > 0) || !(data.severeThreshold > data.majorThreshold)) {
+    v.error('thresholds', '伤害阈值应满足：致命阈值 > 重伤阈值 > 0');
+  }
+
+  /* 经历与领域卡数量 */
+  const level = data.level || 1;
+  const exps = (data.experiences || []).filter(e => (e.name || '').trim());
+  const needExp = 2 + Math.max(0, level - 1);
+  if (exps.length < needExp) v.error('experiences', `${level} 级应有 ${needExp} 条经历，当前 ${exps.length} 条`);
+  const needCards = 2 + Math.max(0, level - 1);
+  if (cards.length < needCards) v.error('domainCards', `${level} 级应有 ${needCards} 张领域卡，当前 ${cards.length} 张`);
+
+  /* 九玄技：起始不该领悟 */
+  const mysteries = data.nineMysteries || [];
+  if (mysteries.length && level < 5) {
+    v.warn('nineMysteries', `刚建卡就带了 ${mysteries.length} 项九玄技；原文未给出起始领悟规则，请与主持人确认`);
+  }
+
+  /* 道心经历 */
+  if (!data.daoHeart?.name) v.warn('daoHeart', '还没给道心经历起名');
+  if ((data.daoHeart?.mod ?? -2) > 0) {
+    v.warn('daoHeart', `道心经历是 +${data.daoHeart.mod}；原文写的是 −2，若你读作笔误请忽略这条`);
+  }
+
+  return v.result;
+}
+
+export const HUAZHU_CREATION = {
+  summary: '在匕首之心的车卡基础上，法门决定第一个领域与闪避/生命点，'
+    + '宗门流派再给出第二个领域、施法属性与初始物品；领域卡只能从这两个领域里选。',
+  traits: {
+    keys: DH_TRAITS.map(t => t.key),
+    labels: Object.fromEntries(DH_TRAITS.map(t => [t.key, `${t.label} ${t.abbr}`])),
+    array: TRAIT_SET,
+  },
+  fields: [
+    { key: 'className', label: '法门', type: 'select', options: HUAZHU_CLASSES.map(c => c.name) },
+    { key: 'subclass', label: '宗门流派', type: 'select', dependsOn: 'className' },
+    { key: 'level', label: '等级', type: 'number', min: 1, max: 10, default: 1 },
+    { key: 'ancestry', label: '种族', type: 'select', options: HUAZHU_ANCESTRIES.filter(a => a.playable !== false).map(a => a.name) },
+    { key: 'community', label: '社群', type: 'select', options: HUAZHU_COMMUNITIES.map(c => c.name) },
+  ],
+  budgets: creationBudgets,
+  validate: creationValidate,
+  traitSet: TRAIT_SET,
+  usableDomains,
+  subclassesOf,
+};
+
 export default {
   id: 'huazhu',
   name: '华渚（中式奇幻·匕首之心）',
@@ -277,6 +440,7 @@ export default {
   resolveDamage,
   damageSeverity,
   initiative,
+  creation: HUAZHU_CREATION,
   tierFor,
   reputationBand,
   subclassesOf,

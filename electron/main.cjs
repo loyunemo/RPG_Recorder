@@ -249,6 +249,81 @@ function createWindow() {
     });
   }
 
+  // 开发辅助：--shot-wizard <目录> 打开车卡向导，逐步截图
+  const wizIdx = process.argv.indexOf('--shot-wizard');
+  if (wizIdx >= 0) {
+    const outDir = path.resolve(process.argv[wizIdx + 1] || 'wizard-shots');
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    mainWindow.webContents.once('did-finish-load', async () => {
+      const js = (code) => mainWindow.webContents.executeJavaScript(`(() => { ${code} })()`)
+        .catch(e => { console.error('[wiz]', e.message); return null; });
+      const shoot = async (name) => {
+        mainWindow.show(); mainWindow.focus(); mainWindow.moveTop();
+        await sleep(320);
+        const img = await mainWindow.webContents.capturePage();
+        if (img.isEmpty()) { console.error('[wiz] 空图：', name); return; }
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(path.join(outDir, `${name}.png`), img.toPNG());
+        console.log('[wiz] 截图：', name);
+      };
+
+      try {
+        await sleep(2600);
+        const count = await js(`return document.querySelectorAll('.topbar select')[0]?.options.length || 0;`);
+        for (let c = 0; c < (count || 1); c++) {
+          await js(`const s=document.querySelectorAll('.topbar select')[0];
+                    if(!s||!s.options[${c}])return false;
+                    s.selectedIndex=${c}; s.dispatchEvent(new Event('change')); return true;`);
+          await sleep(1400);
+          const sys = await js(`const b=document.querySelector('.topbar .badge'); if(!b)return '';
+            for(const id of ['coc7','dnd5e','daggerheart','huazhu']) if(b.classList.contains(id)) return id; return '';`);
+
+          // 打开车卡向导
+          const opened = await js(`
+            const btns = [...document.querySelectorAll('button')];
+            const b = btns.find(x => x.textContent.includes('新角色') || x.textContent.trim() === '＋');
+            if (!b) return false; b.click(); return true;`);
+          if (!opened) { console.log('[wiz] ' + sys + '：找不到新建按钮'); continue; }
+          await sleep(700);
+
+          // 第一步必须填名字，「下一步」才会解禁
+          await js(`
+            const ni = document.querySelector('.modal input.input');
+            if (ni && !ni.value) {
+              ni.value = '测试角色';
+              ni.dispatchEvent(new Event('input', { bubbles: true }));
+              ni.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return true;`);
+          await sleep(500);
+
+          // 逐步走一遍
+          const steps = [];
+          for (let i = 0; i < 5; i++) {
+            await shoot(`${c}-${sys}-step${i + 1}`);
+            const next = await js(`
+              const btns = [...document.querySelectorAll('.modal button')];
+              const n = btns.find(b => b.textContent.trim() === '下一步');
+              if (n && !n.disabled) { n.click(); return 'next'; }
+              if (btns.some(b => b.textContent.trim() === '完成车卡')) return 'last';
+              if (n) return 'blocked';
+              return 'stop';`);
+            steps.push(next);
+            if (next !== 'next') break;
+            await sleep(600);
+          }
+          console.log('[wiz] ' + sys + ' 步骤流转：' + steps.join(' → '));
+          await js(`document.querySelector('.modal-foot button')?.click(); return true;`);  // 取消
+          await sleep(400);
+        }
+      } catch (err) {
+        console.error('[wiz] 出错：', err && err.stack || err);
+      } finally {
+        app.quit();
+      }
+    });
+  }
+
   // 开发辅助：--screenshot <目录> 遍历战役与标签页截图，用于快速核对界面
   const shotIdx = process.argv.indexOf('--screenshot');
   if (shotIdx >= 0) {

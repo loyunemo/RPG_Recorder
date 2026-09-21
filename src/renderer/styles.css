@@ -489,6 +489,20 @@ button { cursor: pointer; }
 .modal .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
 .modal .modal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 
+/* 车卡向导：头部与底部固定，只有中间滚动，避免提示与按钮滚出视野 */
+.modal.wizard {
+  display: flex; flex-direction: column;
+  max-height: 88vh; overflow: hidden;
+}
+.modal.wizard .wiz-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding-right: 6px; margin-right: -6px;
+}
+.modal.wizard .modal-foot {
+  flex: 0 0 auto; margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
 .radio-cards { display: flex; flex-direction: column; gap: 8px; }
 .radio-card {
   border: 1px solid var(--border); border-radius: var(--radius);

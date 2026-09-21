@@ -10,6 +10,7 @@ import os from 'node:os';
 
 import { RNG, newSeed, xmur3, mulberry32 } from '../src/core/rng.js';
 import { rollExpr, parseExpression, rollPercentile, DiceError } from '../src/core/dice.js';
+import { pointBuyCost } from '../src/core/creation.js';
 import { getRuleset } from '../src/core/rulesets/index.js';
 import coc7 from '../src/core/rulesets/coc7.js';
 import dnd5e from '../src/core/rulesets/dnd5e.js';
@@ -1294,6 +1295,446 @@ test('损坏的日志行不会影响其余事件读取', () => {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+/* ══════════════════════════ 车卡规则 ══════════════════════════ */
+
+group('车卡规则 · COC 7 版');
+
+test('属性按规则书公式掷出，落在合法区间', () => {
+  for (let i = 0; i < 40; i++) {
+    const r = coc7.creation.attributes.roll(new RNG(newSeed()));
+    for (const k of ['str', 'con', 'dex', 'app', 'pow']) {
+      assert.ok(r.attributes[k] >= 15 && r.attributes[k] <= 90, `${k} = ${r.attributes[k]} 超出 3d6×5 的 15~90`);
+      assert.equal(r.attributes[k] % 5, 0, '应为 5 的倍数');
+    }
+    for (const k of ['siz', 'int', 'edu']) {
+      assert.ok(r.attributes[k] >= 40 && r.attributes[k] <= 90, `${k} = ${r.attributes[k]} 超出 (2d6+6)×5 的 40~90`);
+    }
+    assert.ok(r.luck >= 15 && r.luck <= 90);
+  }
+});
+
+test('年龄修正按规则书的额度下降', () => {
+  const base = { str: 60, con: 60, dex: 60, app: 60, pow: 60, siz: 60, int: 60, edu: 60 };
+
+  const young = coc7.creation.attributes.applyAge(base, 18);
+  assert.equal(base.str - young.str + (base.siz - young.siz), 5, '15–19 岁：力量+体型合计 −5');
+  assert.equal(young.edu, 55, '15–19 岁：教育 −5');
+
+  const mid = coc7.creation.attributes.applyAge(base, 45);
+  const lost = (base.str - mid.str) + (base.con - mid.con) + (base.dex - mid.dex);
+  assert.equal(lost, 5, '40–49 岁：力量/体质/敏捷合计 −5');
+  assert.equal(mid.app, 55, '40–49 岁：外貌 −5');
+  assert.equal(mid.edu, 60, '40–49 岁不改教育');
+
+  const old = coc7.creation.attributes.applyAge(base, 65);
+  const lostOld = (base.str - old.str) + (base.con - old.con) + (base.dex - old.dex);
+  assert.equal(lostOld, 20, '60–69 岁合计 −20');
+  assert.equal(old.app, 45);
+
+  const ancient = coc7.creation.attributes.applyAge(base, 85);
+  assert.equal((base.str - ancient.str) + (base.con - ancient.con) + (base.dex - ancient.dex), 80);
+});
+
+test('年龄修正不会把属性压成负数', () => {
+  const weak = { str: 20, con: 20, dex: 20, app: 20, pow: 40, siz: 45, int: 50, edu: 50 };
+  const out = coc7.creation.attributes.applyAge(weak, 85);
+  for (const [k, v] of Object.entries(out)) assert.ok(v >= 0, `${k} 变成负数：${v}`);
+});
+
+test('技能点预算 = 教育×4 与智力×2', () => {
+  const data = coc7.createDefault('测试');
+  data.attributes.edu = 70;
+  data.attributes.int = 60;
+  data.occupationSkills = ['侦察'];
+  data.skills['侦察'] = 25 + 30;      // 基础 25，加了 30
+  data.skills['图书馆使用'] = 20 + 15; // 基础 20，加了 15（非本职）
+
+  const b = coc7.creation.budgets(data);
+  const occ = b.find(x => x.key === 'occupationPoints');
+  const intr = b.find(x => x.key === 'interestPoints');
+  assert.equal(occ.total, 70 * 4);
+  assert.equal(occ.used, 30, '只统计本职技能上的加点');
+  assert.equal(intr.total, 60 * 2);
+  assert.equal(intr.used, 15, '非本职的加点算进兴趣点');
+});
+
+test('技能点超支会被拦下', () => {
+  const data = coc7.createDefault('测试');
+  data.attributes.edu = 40;
+  data.occupationSkills = ['侦察'];
+  data.skills['侦察'] = 25 + 999;   // 远超 160 的预算
+  const res = coc7.creation.validate(data);
+  assert.equal(res.ok, false);
+  assert.ok(res.errors.some(e => /本职技能点超出/.test(e.message)), JSON.stringify(res.errors));
+});
+
+test('本职技能超过 8 项会被拦下', () => {
+  const data = coc7.createDefault('测试');
+  data.occupationSkills = Object.keys(data.skills).slice(0, 9);
+  const res = coc7.creation.validate(data);
+  assert.ok(res.errors.some(e => /最多 8 项/.test(e.message)));
+});
+
+test('属性越界会被拦下（硬边界）', () => {
+  const data = coc7.createDefault('测试');
+  data.attributes.str = 0;      // 硬边界之外
+  data.attributes.siz = 120;    // 硬边界之外
+  const res = coc7.creation.validate(data);
+  assert.equal(res.ok, false);
+  assert.ok(res.errors.some(e => /力量/.test(e.message)));
+  assert.ok(res.errors.some(e => /体型/.test(e.message)));
+});
+
+test('偏离掷骰范围只提醒、不阻止（年龄修正会合法下调）', () => {
+  const data = coc7.createDefault('测试');
+  data.age = 30;
+  data.attributes.siz = 20;     // 掷骰最低 40，但可能是手工设定
+  const res = coc7.creation.validate(data);
+  assert.ok(res.warnings.some(w => /体型 20 不在掷骰范围/.test(w.message)));
+  assert.ok(!res.errors.some(e => /体型/.test(e.message)), '这种情况不该是 error');
+});
+
+test('年龄修正后的属性不会被误判为越界', () => {
+  const data = coc7.createDefault('测试');
+  data.age = 85;
+  const rolled = coc7.creation.attributes.roll(new RNG(newSeed()));
+  Object.assign(data.attributes, coc7.creation.attributes.applyAge(rolled.attributes, 85));
+  const res = coc7.creation.validate(data);
+  assert.ok(!res.errors.some(e => /超出 1~99/.test(e.message)), JSON.stringify(res.errors));
+});
+
+group('车卡规则 · DND 5 版');
+
+test('点数购买换算与规则书一致', () => {
+  assert.equal(pointBuyCost([8, 8, 8, 8, 8, 8]), 0);
+  assert.equal(pointBuyCost([13, 13, 13, 13, 13, 13]), 30);   // 5×6
+  assert.equal(pointBuyCost([15, 15, 15, 8, 8, 8]), 27);      // 9×3，刚好用满 27 点
+  assert.equal(pointBuyCost([14, 14, 14, 8, 8, 8]), 21);      // 7×3
+  assert.equal(pointBuyCost([16, 10, 10, 10, 10, 10]), null, '16 超出点数购买上限 15');
+});
+
+test('标准数组必须是原数组的重新排列', () => {
+  const data = dnd5e.createDefault('测试');
+  data.creationMethod = 'standard';
+  data.className = '战士';
+  data.baseAbilities = { str: 15, dex: 14, con: 13, int: 12, wis: 10, cha: 8 };
+  data.abilities = { ...data.baseAbilities };
+  data.raceBonuses = {};
+  data.race = '';
+  const ok = dnd5e.creation.validate(data);
+  assert.ok(!ok.errors.some(e => /标准数组/.test(e.message)), '正确排列不应报错');
+
+  data.baseAbilities = { str: 15, dex: 15, con: 13, int: 12, wis: 10, cha: 8 };
+  const bad = dnd5e.creation.validate(data);
+  assert.ok(bad.errors.some(e => /标准数组/.test(e.message)), '重复值应被拦下');
+});
+
+test('点数购买超支会被拦下', () => {
+  const data = dnd5e.createDefault('测试');
+  data.creationMethod = 'pointbuy';
+  data.baseAbilities = { str: 15, dex: 15, con: 15, int: 15, wis: 15, cha: 15 };  // 54 点
+  data.abilities = { ...data.baseAbilities };
+  const res = dnd5e.creation.validate(data);
+  assert.ok(res.errors.some(e => /点数超出预算/.test(e.message)), JSON.stringify(res.errors));
+});
+
+test('种族加值正确叠加并可反推', () => {
+  const data = dnd5e.createDefault('测试');
+  data.baseAbilities = { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 };
+  const res = dnd5e.creation.attributes.applyRace(data, '山地矮人');
+  assert.equal(res.abilities.con, 12, '山地矮人 体质 +2');
+  assert.equal(res.abilities.str, 12, '山地矮人 力量 +2');
+  assert.equal(res.abilities.dex, 10);
+  assert.equal(res.baseAbilities.con, 10, '基础值应保持不变');
+});
+
+test('半精灵需要自选两项 +1', () => {
+  const data = dnd5e.createDefault('测试');
+  data.baseAbilities = { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 };
+
+  const two = dnd5e.creation.attributes.applyRace(data, '半精灵', ['str', 'dex']);
+  assert.equal(two.abilities.cha, 12, '半精灵 魅力 +2');
+  assert.equal(two.abilities.str, 11);
+  assert.equal(two.abilities.dex, 11);
+
+  data.race = '半精灵';
+  Object.assign(data, two);
+  const good = dnd5e.creation.validate(data);
+  assert.ok(!good.errors.some(e => /自选/.test(e.message)), '选够两项不应报错');
+
+  Object.assign(data, dnd5e.creation.attributes.applyRace(data, '半精灵', ['str']));
+  const bad = dnd5e.creation.validate(data);
+  assert.ok(bad.errors.some(e => /自选 2 项/.test(e.message)), '只选一项应被拦下');
+});
+
+test('1 级生命值 = 生命骰满值 + 体质调整值', () => {
+  const abilities = { str: 10, dex: 10, con: 14, int: 10, wis: 10, cha: 10 };  // CON +2
+  assert.equal(dnd5e.creation.expectedHp('战士', 1, abilities), 10 + 2);
+  assert.equal(dnd5e.creation.expectedHp('法师', 1, abilities), 6 + 2);
+  assert.equal(dnd5e.creation.expectedHp('野蛮人', 1, abilities), 12 + 2);
+});
+
+test('职业决定豁免熟练与技能数量', () => {
+  const data = dnd5e.createDefault('测试');
+  data.className = '游荡者';
+  data.level = 1;
+  data.abilities = { str: 10, dex: 16, con: 10, int: 12, wis: 10, cha: 10 };
+  data.baseAbilities = { ...data.abilities };
+  data.raceBonuses = {};
+  data.combat.hpMax = 8 + 3;
+  data.proficiency.saves = ['dex', 'int'];
+  data.proficiency.skills = ['体操', '调查'];
+
+  const res = dnd5e.creation.validate(data);
+  assert.ok(res.errors.some(e => /恰好选 4 项/.test(e.message)), '游荡者只选了 2 项，应报错');
+
+  data.proficiency.skills = ['体操', '调查', '察觉', '隐匿'];
+  const ok = dnd5e.creation.validate(data);
+  assert.ok(!ok.errors.some(e => /技能/.test(e.message)), '选够 4 项后不应再有技能相关的错误');
+});
+
+test('选了职业技能表以外的技能会被拦下', () => {
+  const data = dnd5e.createDefault('测试');
+  data.className = '战士';
+  data.level = 1;
+  data.abilities = { str: 16, dex: 14, con: 14, int: 10, wis: 10, cha: 10 };
+  data.baseAbilities = { ...data.abilities };
+  data.raceBonuses = {};
+  data.combat.hpMax = 10 + 2;
+  data.proficiency.saves = ['str', 'con'];
+  data.proficiency.skills = ['运动', '奥秘'];   // 奥秘不在战士技能表里
+  const res = dnd5e.creation.validate(data);
+  assert.ok(res.errors.some(e => /不在 战士 的技能表里/.test(e.message)), JSON.stringify(res.errors));
+});
+
+group('车卡规则 · 匕首心 / 华渚');
+
+test('起始属性数组必须恰好用掉 +2/+1/+1/0/0/−1', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '战士';
+  data.evasionBase = 11;
+  data.hpMax = 6;
+  data.armorSlotsMax = data.armorScore;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: 'a', mod: 2 }, { name: 'b', mod: 2 }];
+
+  const ok = daggerheart.creation.validate(data);
+  assert.ok(!ok.errors.some(e => /起始数组/.test(e.message)), JSON.stringify(ok.errors));
+
+  data.traits = { agility: 2, strength: 2, finesse: 0, instinct: 0, presence: 0, knowledge: -1 };
+  const bad = daggerheart.creation.validate(data);
+  assert.ok(bad.errors.some(e => /属性分配不合法/.test(e.message)), '重复用 +2 应被拦下');
+});
+
+test('职业闪避与生命点会被校验', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '游荡者';
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.evasionBase = 11;   // 游荡者应为 12
+  data.hpMax = 9;          // 应为 6
+  const res = daggerheart.creation.validate(data);
+  assert.ok(res.errors.some(e => /起始闪避应为 12/.test(e.message)));
+  assert.ok(res.errors.some(e => /起始生命点应为 6/.test(e.message)));
+});
+
+test('经历与领域卡数量按等级校验', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '战士';
+  data.evasionBase = 11;
+  data.hpMax = 6;
+  data.armorSlotsMax = data.armorScore;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [];
+  data.domainCards = [];
+  data.level = 1;
+  const res = daggerheart.creation.validate(data);
+  assert.ok(res.errors.some(e => /应有 2 条经历/.test(e.message)));
+  assert.ok(res.errors.some(e => /应有 2 张领域卡/.test(e.message)));
+
+  data.level = 3;
+  const res3 = daggerheart.creation.validate(data);
+  assert.ok(res3.errors.some(e => /应有 4 条经历/.test(e.message)), '3 级应要 4 条经历');
+});
+
+test('护甲槽必须等于护甲分数', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '战士';
+  data.evasionBase = 11;
+  data.hpMax = 6;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: 'a', mod: 2 }, { name: 'b', mod: 2 }];
+  data.domainCards = [{ name: 'x', domain: 'y', level: 1 }];
+  data.domainCards.push({ name: 'z', domain: 'y', level: 1 });
+  data.armorScore = 3;
+  data.armorSlotsMax = 5;
+  const res = daggerheart.creation.validate(data);
+  assert.ok(res.errors.some(e => /护甲槽数量应等于护甲分数/.test(e.message)));
+});
+
+test('华渚：法门与宗门必须匹配，领域自动带出', () => {
+  const data = HZ.createDefault('测试');
+  data.className = '剑修';
+  data.subclass = '云隐剑宗';
+  const cls = HZ.classes.find(c => c.name === '剑修');
+  const sub = cls.subclasses.find(s => s.name === '云隐剑宗');
+  if (!sub) { assert.ok(cls.subclasses.length > 0, '剑修应有宗门'); return; }
+
+  data.evasionBase = cls.evasion;
+  data.hpMax = cls.hp;
+  data.domain = cls.domain;
+  data.sectNature = sub.sectNature;
+  data.spellcastTrait = sub.spellcastTrait;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: 'a', mod: 2 }, { name: 'b', mod: 2 }];
+  data.domainCards = [];
+  data.armorSlotsMax = data.armorScore;
+
+  const usable = HZ.creation.usableDomains(data);
+  assert.ok(usable.includes(cls.domain), `可用领域应含法门领域 ${cls.domain}`);
+
+  // 从可用领域里挑两张卡
+  const dom = HZ.domains.find(d => d.name === usable[0]);
+  const cards = HZ.domainCards.filter(c => c.domain === dom.id).slice(0, 2);
+  data.domainCards = cards.map(c => ({ name: c.name, domain: dom.name, level: c.level }));
+
+  const res = HZ.creation.validate(data);
+  assert.ok(!res.errors.some(e => /不在你的可用领域/.test(e.message)), JSON.stringify(res.errors));
+});
+
+test('华渚：选了不属于可用领域的卡会被拦下', () => {
+  const data = HZ.createDefault('测试');
+  data.className = '剑修';
+  const cls = HZ.classes.find(c => c.name === '剑修');
+  data.subclass = cls.subclasses[0]?.name || '';
+  data.domain = cls.domain;
+  data.evasionBase = cls.evasion;
+  data.hpMax = cls.hp;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: 'a', mod: 2 }, { name: 'b', mod: 2 }];
+  data.armorSlotsMax = data.armorScore;
+  data.domainCards = [
+    { name: '越界卡', domain: '一个不存在的领域', level: 1 },
+    { name: '越界卡2', domain: '另一个不存在的领域', level: 1 },
+  ];
+  const res = HZ.creation.validate(data);
+  assert.ok(res.errors.some(e => /不在你的可用领域/.test(e.message)), JSON.stringify(res.errors).slice(0, 200));
+});
+
+test('四套规则的 createDefault 都能被 validate 处理而不崩', () => {
+  for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+    const rs = getRuleset(id);
+    assert.ok(rs.creation, `${id} 缺少 creation 规格`);
+    const data = rs.createDefault('测试');
+    const res = rs.creation.validate(data);
+    assert.ok(Array.isArray(res.errors) && Array.isArray(res.warnings), `${id} 校验结果结构不对`);
+    assert.ok(rs.creation.budgets, `${id} 缺少 budgets`);
+    assert.ok(Array.isArray(rs.creation.budgets(data)), `${id} budgets 应返回数组`);
+  }
+});
+
+group('车卡规则 · 可满足性');
+
+test('COC：能造出完全合规的调查员', () => {
+  const data = coc7.createDefault('合规调查员');
+  const rolled = coc7.creation.attributes.roll(new RNG(newSeed()));
+  Object.assign(data.attributes, coc7.creation.attributes.applyAge(rolled.attributes, data.age));
+  data.luck = rolled.luck;
+  data.state.luck = rolled.luck;
+
+  // 标记 8 项本职技能，并把职业点与兴趣点花在预算内
+  data.occupationSkills = ['侦察', '聆听', '图书馆使用', '心理学', '潜行', '急救', '说服', '闪避'];
+  const occBudget = data.attributes.edu * 4;
+  const perSkill = Math.floor(occBudget / 8);
+  for (const name of data.occupationSkills) {
+    data.skills[name] = (data.skills[name] || 0) + perSkill;
+  }
+  const intBudget = data.attributes.int * 2;
+  data.skills['历史'] += intBudget;
+
+  const res = coc7.creation.validate(data);
+  assert.deepEqual(res.errors, [], `应无 error：${JSON.stringify(res.errors)}`);
+});
+
+test('DND：能造出完全合规的 1 级角色', () => {
+  const data = dnd5e.createDefault('合规冒险者');
+  data.creationMethod = 'standard';
+  data.className = '战士';
+  data.race = '山地矮人';
+  data.level = 1;
+  data.baseAbilities = { str: 15, dex: 14, con: 13, int: 12, wis: 10, cha: 8 };
+  Object.assign(data, dnd5e.creation.attributes.applyRace(data, '山地矮人'));
+  data.proficiency.saves = ['str', 'con'];
+  data.proficiency.skills = ['运动', '察觉'];
+  data.combat.hpMax = dnd5e.creation.expectedHp('战士', 1, data.abilities);
+
+  const res = dnd5e.creation.validate(data);
+  assert.deepEqual(res.errors, [], `应无 error：${JSON.stringify(res.errors)}`);
+});
+
+test('匕首心：能造出完全合规的 1 级角色', () => {
+  const data = daggerheart.createDefault('合规英雄');
+  data.className = '游荡者';
+  data.level = 1;
+  const cls = daggerheart.classes.find(c => c.name === '游荡者');
+  data.evasionBase = cls.evasion;
+  data.hpMax = cls.hp;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: '街头生存', mod: 2 }, { name: '开锁', mod: 2 }];
+  data.domainCards = [
+    { name: '暗影步', domain: '午夜', level: 1 },
+    { name: '疾风连击', domain: '优雅', level: 1 },
+  ];
+  data.hope = 2;
+  data.stressMax = 6;
+  data.armorSlotsMax = data.armorScore;
+
+  const res = daggerheart.creation.validate(data);
+  assert.deepEqual(res.errors, [], `应无 error：${JSON.stringify(res.errors)}`);
+});
+
+test('华渚：能造出完全合规的 1 级修行者（领域卡来自法门或宗门）', () => {
+  const data = HZ.createDefault('合规修行者');
+  data.className = '剑修';
+  const cls = HZ.classes.find(c => c.name === '剑修');
+  data.subclass = cls.subclasses[0].name;
+  const sub = cls.subclasses[0];
+  data.domain = cls.domain;
+  data.sectNature = sub.sectNature;
+  data.spellcastTrait = sub.spellcastTrait;
+  data.evasionBase = cls.evasion;
+  data.hpMax = cls.hp;
+  data.level = 1;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: '山野求生', mod: 2 }, { name: '辨认真气', mod: 2 }];
+  data.hope = 2;
+  data.stressMax = 6;
+  data.armorSlotsMax = data.armorScore;
+  data.daoHeart = { name: '剑心通明', mod: -2 };
+
+  // 从可用领域里各取一张
+  const usable = HZ.creation.usableDomains(data);
+  assert.ok(usable.length >= 1, '应至少有一个可用领域');
+  const picked = [];
+  for (const domainName of usable) {
+    const dom = HZ.domains.find(d => d.name === domainName);
+    if (!dom) continue;
+    const card = HZ.domainCards.find(c => c.domain === dom.id);
+    if (card) picked.push({ name: card.name, domain: dom.name, level: card.level });
+    if (picked.length >= 2) break;
+  }
+  // 只有一个可用领域时，从同一领域取两张
+  if (picked.length < 2) {
+    const dom = HZ.domains.find(d => d.name === usable[0]);
+    const more = HZ.domainCards.filter(c => c.domain === dom.id).slice(0, 2);
+    picked.length = 0;
+    for (const c of more) picked.push({ name: c.name, domain: dom.name, level: c.level });
+  }
+  data.domainCards = picked;
+
+  const res = HZ.creation.validate(data);
+  assert.deepEqual(res.errors, [], `应无 error：${JSON.stringify(res.errors)}`);
 });
 
 /* ══════════════════════════ 渲染层接口一致性 ══════════════════════════ */

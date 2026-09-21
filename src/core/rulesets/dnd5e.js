@@ -4,6 +4,11 @@
  * 判定核心：d20 + 属性调整值 + 熟练加值 对抗 DC，含优势 / 劣势与天然 20 / 天然 1。
  */
 
+import {
+  validator, roll4d6dl1, STANDARD_ARRAY, pointBuyCost, POINT_BUY_BUDGET,
+  makeBudgets, sameMultiset,
+} from '../creation.js';
+
 export const DND_ABILITIES = [
   { key: 'str', label: '力量', abbr: 'STR' },
   { key: 'dex', label: '敏捷', abbr: 'DEX' },
@@ -62,6 +67,10 @@ function createDefault(name = '新冒险者') {
     backgroundName: '',
     alignment: '',
     abilities,
+    /** 车卡时记录的「加种族加值之前」的属性，用于校验点数购买是否超支 */
+    baseAbilities: { ...abilities },
+    /** 已应用的种族加值，便于在校验时反推基础值 */
+    raceBonuses: {},
     proficiency: { skills: [], saves: [], expertise: [] },
     combat: {
       hpMax: 10, hp: null, tempHp: 0, hitDice: '1d8', hitDiceUsed: 0,
@@ -365,6 +374,213 @@ function deathSave(rng, state = {}) {
   };
 }
 
+/* ────────────────────────── 车卡规则 ────────────────────────── */
+
+/** 12 个基础职业：生命骰、豁免熟练、可选技能数与技能表 */
+export const DND_CLASSES = [
+  { name: '野蛮人', hitDie: 12, saves: ['str', 'con'], skillCount: 2, skills: ['驯兽', '运动', '威吓', '自然', '察觉', '生存'] },
+  { name: '吟游诗人', hitDie: 8, saves: ['dex', 'cha'], skillCount: 3, skills: 'any' },
+  { name: '牧师', hitDie: 8, saves: ['wis', 'cha'], skillCount: 2, skills: ['历史', '洞悉', '医药', '说服', '宗教'] },
+  { name: '德鲁伊', hitDie: 8, saves: ['int', 'wis'], skillCount: 2, skills: ['奥秘', '驯兽', '洞悉', '医药', '自然', '察觉', '宗教', '生存'] },
+  { name: '战士', hitDie: 10, saves: ['str', 'con'], skillCount: 2, skills: ['体操', '驯兽', '运动', '历史', '洞悉', '威吓', '察觉', '生存'] },
+  { name: '武僧', hitDie: 8, saves: ['str', 'dex'], skillCount: 2, skills: ['体操', '运动', '历史', '洞悉', '宗教', '隐匿'] },
+  { name: '圣武士', hitDie: 10, saves: ['wis', 'cha'], skillCount: 2, skills: ['体操', '运动', '洞悉', '威吓', '医药', '说服', '宗教'] },
+  { name: '游侠', hitDie: 10, saves: ['str', 'dex'], skillCount: 3, skills: ['驯兽', '运动', '洞悉', '调查', '自然', '察觉', '隐匿', '生存'] },
+  { name: '游荡者', hitDie: 8, saves: ['dex', 'int'], skillCount: 4, skills: ['体操', '运动', '欺骗', '洞悉', '威吓', '调查', '察觉', '表演', '说服', '巧手', '隐匿'] },
+  { name: '术士', hitDie: 6, saves: ['con', 'cha'], skillCount: 2, skills: ['奥秘', '欺骗', '洞悉', '威吓', '说服', '宗教'] },
+  { name: '邪术师', hitDie: 8, saves: ['wis', 'cha'], skillCount: 2, skills: ['奥秘', '欺骗', '历史', '威吓', '调查', '自然', '宗教'] },
+  { name: '法师', hitDie: 6, saves: ['int', 'wis'], skillCount: 2, skills: ['奥秘', '历史', '洞悉', '调查', '医药', '宗教'] },
+];
+
+/** 常见种族及其属性加值；半精灵的 +1×2 由玩家自选 */
+export const DND_RACES = [
+  { name: '人类', bonuses: { str: 1, dex: 1, con: 1, int: 1, wis: 1, cha: 1 } },
+  { name: '高等精灵', bonuses: { dex: 2, int: 1 } },
+  { name: '木精灵', bonuses: { dex: 2, wis: 1 } },
+  { name: '卓尔精灵', bonuses: { dex: 2, cha: 1 } },
+  { name: '丘陵矮人', bonuses: { con: 2, wis: 1 } },
+  { name: '山地矮人', bonuses: { con: 2, str: 2 } },
+  { name: '轻足半身人', bonuses: { dex: 2, cha: 1 } },
+  { name: '龙裔', bonuses: { str: 2, cha: 1 } },
+  { name: '森林侏儒', bonuses: { int: 2, dex: 1 } },
+  { name: '岩侏儒', bonuses: { int: 2, con: 1 } },
+  { name: '半精灵', bonuses: { cha: 2 }, choices: { count: 2, amount: 1 } },
+  { name: '半兽人', bonuses: { str: 2, con: 1 } },
+  { name: '提夫林', bonuses: { cha: 2, int: 1 } },
+];
+
+const classOf = (name) => DND_CLASSES.find(c => c.name === name) || null;
+const raceOf = (name) => DND_RACES.find(r => r.name === name) || null;
+
+/** 把种族加值叠加到属性上，并记录加值便于反推 */
+function applyRace(data, raceName, extraChoices = []) {
+  const race = raceOf(raceName);
+  const base = { ...(data.baseAbilities || data.abilities) };
+  const bonuses = {};
+  if (race) {
+    for (const [k, v] of Object.entries(race.bonuses)) bonuses[k] = (bonuses[k] || 0) + v;
+    if (race.choices) {
+      for (const k of extraChoices.slice(0, race.choices.count)) {
+        bonuses[k] = (bonuses[k] || 0) + race.choices.amount;
+      }
+    }
+  }
+  const abilities = { ...base };
+  for (const [k, v] of Object.entries(bonuses)) abilities[k] = (abilities[k] || 0) + v;
+  return { baseAbilities: base, abilities, raceBonuses: bonuses };
+}
+
+/** 1 级生命值 = 生命骰满值 + 体质调整值；更高等级按「取半+1」估算 */
+function expectedHp(className, level, abilities) {
+  const cls = classOf(className);
+  if (!cls) return null;
+  const conMod = abilityMod(abilities.con || 10);
+  const avg = Math.floor(cls.hitDie / 2) + 1;
+  return cls.hitDie + (level - 1) * avg + level * conMod;
+}
+
+function creationBudgets(data) {
+  const cls = classOf(data.className);
+  const n = (data.proficiency?.skills || []).length;
+  const budget = [];
+
+  if (data.creationMethod === 'pointbuy') {
+    const base = data.baseAbilities || data.abilities;
+    const cost = pointBuyCost(Object.values(base));
+    budget.push({
+      key: 'pointBuy', label: '点数购买', total: POINT_BUY_BUDGET,
+      used: cost ?? 0, hint: cost == null ? '属性需在 8~15 之间' : '8~13 每点 1 分，14 需 7 分，15 需 9 分',
+    });
+  }
+
+  if (cls) {
+    budget.push({
+      key: 'skillPicks', label: `${cls.name} 技能选择`,
+      total: cls.skillCount, used: n, unit: '项',
+      hint: cls.skills === 'any' ? '可从全部 18 项技能中选择' : `限：${cls.skills.join('、')}`,
+    });
+  }
+  return makeBudgets(budget);
+}
+
+function creationValidate(data) {
+  const v = validator();
+  const abilities = data.abilities || {};
+  const base = data.baseAbilities || abilities;
+
+  /* 属性值 */
+  for (const a of DND_ABILITIES) {
+    const val = abilities[a.key];
+    if (!Number.isFinite(val)) v.error(`attr.${a.key}`, `${a.label}未填写`);
+    else if (val < 1 || val > 30) v.error(`attr.${a.key}`, `${a.label} ${val} 超出 1~30`);
+    else if (val > 20 && (data.level || 1) <= 20) v.warn(`attr.${a.key}`, `${a.label} ${val} 超过 20，通常只有魔法物品或传奇恩赐能突破`);
+  }
+
+  /* 生成方式 */
+  const method = data.creationMethod;
+  if (method === 'standard') {
+    if (!sameMultiset(Object.values(base), STANDARD_ARRAY)) {
+      v.error('abilities', `标准数组必须是 ${STANDARD_ARRAY.join(' / ')} 的重新排列，当前为 ${Object.values(base).join(' / ')}`);
+    }
+  } else if (method === 'pointbuy') {
+    const cost = pointBuyCost(Object.values(base));
+    if (cost == null) v.error('abilities', '点数购买的属性值必须在 8~15 之间');
+    else if (cost > POINT_BUY_BUDGET) v.error('abilities', `点数超出预算：已用 ${cost} / ${POINT_BUY_BUDGET}`);
+  } else if (method === 'roll') {
+    for (const val of Object.values(base)) {
+      if (val < 3 || val > 18) v.warn('abilities', `掷骰生成的属性应在 3~18，当前有 ${val}`);
+    }
+  }
+
+  /* 职业与技能 */
+  const cls = classOf(data.className);
+  if (!data.className) v.error('className', '还没选择职业');
+  else if (!cls) v.warn('className', `「${data.className}」不在内置职业表里，无法校验技能与豁免`);
+
+  if (cls) {
+    const picked = data.proficiency?.skills || [];
+    if (picked.length !== cls.skillCount) {
+      v.error('skillPicks', `${cls.name} 需要恰好选 ${cls.skillCount} 项技能，当前 ${picked.length} 项`);
+    }
+    if (cls.skills !== 'any') {
+      const allowed = new Set(cls.skills);
+      // 只要不在本职业的技能表里就该拦下 —— 不能拿「是不是已知技能名」去豁免
+      const bad = picked.filter(s => !allowed.has(s));
+      if (bad.length) v.error('skillPicks', `这些技能不在 ${cls.name} 的技能表里：${bad.join('、')}`);
+    }
+    const saves = [...(data.proficiency?.saves || [])].sort().join(',');
+    const expect = [...cls.saves].sort().join(',');
+    if (saves !== expect) {
+      v.error('saves', `${cls.name} 的豁免熟练应为 ${cls.saves.map(k => DND_ABILITIES.find(a => a.key === k)?.label).join('、')}`);
+    }
+
+    const hp = data.combat?.hpMax;
+    const want = expectedHp(data.className, data.level || 1, abilities);
+    if (Number.isFinite(hp) && want != null && hp !== want) {
+      const msg = `生命上限应为 ${want}（${cls.hitDie} 面生命骰${(data.level || 1) > 1 ? '按升级取半+1' : '满值'} + 体质调整值 ${abilityMod(abilities.con || 10)}）`;
+      if ((data.level || 1) === 1) v.error('hpMax', msg);
+      else v.warn('hpMax', `${msg}；当前 ${hp}（升级时若选择掷骰，数值可以不同）`);
+    }
+  }
+
+  /* 种族 */
+  if (!data.race) v.warn('race', '还没选择种族');
+  else if (!raceOf(data.race)) v.warn('race', `「${data.race}」不在内置种族表里，属性加值需自行确认`);
+  else {
+    const race = raceOf(data.race);
+    for (const [k, want] of Object.entries(data.raceBonuses || {})) {
+      const got = (abilities[k] || 0) - (base[k] || 0);
+      if (got !== want) v.warn(`race.${k}`, `种族加值与记录不符：${k} 记的是 +${want}，实际 +${got}`);
+    }
+    if (race.choices) {
+      const chosen = Object.keys(data.raceBonuses || {}).filter(k => !(k in race.bonuses));
+      if (chosen.length !== race.choices.count) {
+        v.error('race.choice', `${race.name} 需要自选 ${race.choices.count} 项属性各 +${race.choices.amount}，当前选了 ${chosen.length} 项`);
+      }
+    }
+  }
+
+  for (const b of creationBudgets(data)) {
+    if (b.over) v.error(b.key, `${b.label}超出上限：${b.used} / ${b.total} ${b.unit}`);
+  }
+
+  return v.result;
+}
+
+const ALL_SKILL_LABELS = new Set(DND_SKILLS.map(s => s.label));
+
+export const DND_CREATION = {
+  summary: '属性用「标准数组 / 点数购买 / 4d6 弃最低」三选一，再叠加种族加值；'
+    + '职业决定生命骰、两项豁免熟练与可选技能数量，1 级生命值取生命骰满值加体质调整值。',
+  attributes: {
+    keys: DND_ABILITIES.map(a => a.key),
+    labels: Object.fromEntries(DND_ABILITIES.map(a => [a.key, `${a.label} ${a.abbr}`])),
+    min: 3,
+    max: 20,
+    methods: [
+      { id: 'standard', label: '标准数组', hint: `${STANDARD_ARRAY.join(' / ')} 六个数值自行分配到属性上` },
+      { id: 'pointbuy', label: `点数购买（${POINT_BUY_BUDGET} 点）`, hint: '基础值 8~15；8~13 每点 1 分，14 花 7 分，15 花 9 分' },
+      { id: 'roll', label: '掷骰 4d6 弃最低', hint: '每个属性掷 4d6 去掉最低的一颗，再分配到属性上' },
+    ],
+    /** 标准数组可直接分配的数值池 */
+    pool: STANDARD_ARRAY,
+    roll(rng) { return Array.from({ length: 6 }, () => roll4d6dl1(rng)); },
+    applyRace,
+  },
+  fields: [
+    { key: 'className', label: '职业', type: 'select', options: DND_CLASSES.map(c => c.name) },
+    { key: 'race', label: '种族', type: 'select', options: DND_RACES.map(r => r.name) },
+    { key: 'level', label: '等级', type: 'number', min: 1, max: 20, default: 1 },
+    { key: 'backgroundName', label: '背景', type: 'text', placeholder: '例如：智者、士兵' },
+    { key: 'alignment', label: '阵营', type: 'text', placeholder: '例如：中立善良' },
+  ],
+  classTable: DND_CLASSES,
+  raceTable: DND_RACES,
+  budgets: creationBudgets,
+  validate: creationValidate,
+  expectedHp,
+};
+
 export default {
   id: 'dnd5e',
   name: '龙与地下城 5版',
@@ -384,6 +600,7 @@ export default {
   roll,
   deathSave,
   initiative,
+  creation: DND_CREATION,
   abilityMod,
   proficiencyBonus,
 };

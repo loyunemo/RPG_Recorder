@@ -17,7 +17,8 @@ import { renderNotesView } from './views/notes.js';
 import { renderLogView } from './views/log.js';
 import { renderCombatView } from './views/combat.js';
 import { renderJoinView } from './views/join.js';
-import { openNewCampaignDialog, openNewCharacterDialog } from './views/dialogs.js';
+import { openNewCampaignDialog } from './views/dialogs.js';
+import { openCreateWizard } from './views/create.js';
 import { openHelpDialog } from './views/help.js';
 
 /* ────────────────────────────── 状态 ────────────────────────────── */
@@ -1007,19 +1008,26 @@ async function newCampaignFlow() {
 
 async function newCharacterFlow() {
   if (!state.campaign) { toast('请先创建战役', true); return; }
-  const data = await openNewCharacterDialog(ruleset());
-  if (!data) return;
+
+  const result = await openCreateWizard(ruleset());
+  if (!result) return;
+
   const saved = await call('saveCharacter', {
     cid: state.campaign.id,
-    character: { name: data.name, system: ruleset().id, data: data.payload },
+    character: { name: result.name, system: ruleset().id, data: result.payload },
     opts: { sessionId: state.activeSessionId },
   });
+
   await reloadCharacters();
   state.selectedCharacterId = saved.id;
   state.tab = 'sheet';
   await reloadEvents();
   renderAll();
-  toast(`已创建「${saved.name}」`);
+
+  // 车卡结束后把仍存在的提醒再提示一次 —— 上面的 validate 只在向导里显示
+  const res = ruleset().creation?.validate?.(saved.data);
+  const extra = res && res.warnings.length ? `（有 ${res.warnings.length} 条提醒）` : '';
+  toast(`已创建「${saved.name}」${extra}`);
 }
 
 async function exportFlow() {
