@@ -1,4 +1,4 @@
-﻿# 跑团记录系统
+# 跑团记录系统
 
 一个面向 GM（KP / DM / 主持人）的跑团工具：**多人实时牌桌 · 骰子判定 · 战斗追踪 · 完整事件日志 · 角色卡面板**。
 数据存在主持人自己的磁盘上，纯本地运行，不依赖任何外部服务。
@@ -35,28 +35,31 @@
 
 ## 快速开始
 
+### 想直接用：下载安装包
+
+到 [Releases](https://github.com/loyunemo/RPG_Recorder/releases) 下载
+`RPG-Recorder-Setup-x.y.z.exe`（安装版）或 `RPG-Recorder-x.y.z-portable.exe`（便携版，免安装）。
+
+### 想从源码跑
+
 ```bash
-npm install     # 安装依赖（主要是 Electron）
+git clone https://github.com/loyunemo/RPG_Recorder.git
+cd RPG_Recorder
+npm install     # 只装一个东西：Electron
 npm start       # 启动桌面应用
 ```
 
-如果 `npm install` 卡在下载 Electron 二进制（国内网络常见），把镜像指过去再装：
+**不想装 Electron 也行** —— `npm run serve` 只用 Node.js 起一个本地服务并打开浏览器，
+零 npm 依赖，功能与桌面版完全一致。这条路径同时也是多人牌桌的服务端。
 
 ```bash
-# PowerShell
-$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
-npm install
+npm run seed    # 可选：生成四个演示战役（四套规则各一个）
+npm run serve
 ```
 
-想先看看界面长什么样，可以生成一份演示数据：
-
-```bash
-npm run seed    # 生成四个战役（四套规则各一个），含角色卡与日志
-npm start
-```
-
-**没有 Electron 也能用**：`npm run serve` 会在本地起一个服务并打开浏览器，
-功能与桌面版完全一致（数据同样写进本地目录）。这条路径也方便你在改界面时快速刷新。
+> **依赖情况**：本项目**没有任何运行时第三方依赖**，除 Electron 外只用 Node 内置模块。
+> 安装细节、版本要求、国内网络镜像、常见问题、自己打包发布，
+> 全部写在 **[INSTALL.md](INSTALL.md)**。
 
 ---
 
@@ -236,6 +239,9 @@ export default {
 ---
 
 ## 版权说明
+
+程序代码以 [MIT 许可](LICENSE) 发布。
+但**内置的游戏规则数据另有归属，不受 MIT 约束**，完整声明见 [LICENSE](LICENSE) 末尾。
 
 「匕首心」的护甲、职业等规则数据取自
 [Daggerheart System Reference Document 1.0](https://www.daggerheart.com/)，

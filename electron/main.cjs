@@ -280,7 +280,14 @@ function createWindow() {
       const js = (code) => mainWindow.webContents.executeJavaScript(`(() => { ${code} })()`)
         .catch(e => { console.error('[shot]', e.message); return null; });
       const shoot = async (name) => {
+        // 窗口必须真的可见并由合成器绘制过，capturePage 才不会返回空图
+        mainWindow.show();
+        mainWindow.focus();
+        mainWindow.moveTop();
+        await sleep(350);
         const image = await mainWindow.webContents.capturePage();
+        if (image.isEmpty()) { console.error('[shot] 抓到空图：', name); return; }
+        fs.mkdirSync(outDir, { recursive: true });
         fs.writeFileSync(path.join(outDir, `${name}.png`), image.toPNG());
         console.log('[random-walking] 截图：', name);
       };

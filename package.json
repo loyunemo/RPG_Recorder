@@ -1,10 +1,15 @@
 {
   "name": "rpg-recorder",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "跑团记录系统 — 多人牌桌 · 骰子判定 · 战斗追踪 · 事件日志 · 角色卡（COC 7e / DND 5e / 匕首心 / 华渚）",
+  "author": "loyunemo <12560073@zju.edu.cn>",
+  "license": "MIT",
   "main": "electron/main.cjs",
   "type": "module",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -13,9 +18,56 @@
     "test:smoke": "node tests/smoke.js",
     "test:multiplayer": "node tests/multiplayer.js",
     "build:huazhu": "node scripts/build-huazhu-data.cjs",
-    "seed": "node scripts/seed-demo.cjs"
+    "seed": "node scripts/seed-demo.cjs",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --dir"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.loyunemo.rpgrecorder",
+    "productName": "RPG Recorder",
+    "copyright": "RPG Recorder — 非官方跑团辅助工具",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "RPG-Recorder-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "跑团记录系统",
+      "artifactName": "RPG-Recorder-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "RPG-Recorder-${version}-portable.${ext}"
+    }
   }
 }
