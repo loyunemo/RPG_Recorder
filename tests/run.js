@@ -1807,6 +1807,35 @@ test('前端模块之间的相对导入路径都存在', () => {
   assert.deepEqual(broken, [], `以下导入指向了不存在的文件：\n  ${broken.join('\n  ')}`);
 });
 
+test('所有 JSON 文件不带 BOM 且能解析', () => {
+  // 这条是为了防住一个只在打包时才暴露的问题：
+  // 在 Windows PowerShell 5.1 里用 `Set-Content -Encoding UTF8` 改 package.json，
+  // 会写入 BOM，导致 electron-builder 报 "Unexpected token ''，is not valid JSON"。
+  // 平时跑测试完全看不出来，只有打包才炸。
+  const root = path.join(import.meta.dirname, '..');
+  const targets = ['package.json', 'package-lock.json'];
+  const dataDir = path.join(root, 'src', 'core', 'rulesets', 'huazhu', 'data');
+  if (fs.existsSync(dataDir)) {
+    for (const f of fs.readdirSync(dataDir).filter(x => x.endsWith('.json'))) {
+      targets.push(path.join('src', 'core', 'rulesets', 'huazhu', 'data', f));
+    }
+  }
+
+  const problems = [];
+  for (const rel of targets) {
+    const file = path.join(root, rel);
+    if (!fs.existsSync(file)) continue;
+    const buf = fs.readFileSync(file);
+    if (buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+      problems.push(`${rel} 带 BOM`);
+      continue;
+    }
+    try { JSON.parse(buf.toString('utf8')); }
+    catch (err) { problems.push(`${rel} 解析失败：${err.message}`); }
+  }
+  assert.deepEqual(problems, [], problems.join('\n'));
+});
+
 /* ══════════════════════════ 汇总 ══════════════════════════ */
 
 process.stdout.write(`\n${'─'.repeat(52)}\n`);

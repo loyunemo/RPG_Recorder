@@ -178,7 +178,7 @@ data/
 | `npm start` | 启动桌面应用 |
 | `npm run dev` | 启动并打开开发者工具 |
 | `npm run serve` | 浏览器模式（本地服务，无需 Electron） |
-| `npm test` | 核心逻辑测试（骰子引擎 / 四套规则 / 存储层 / 复现性），127 项 |
+| `npm test` | 核心逻辑测试（骰子引擎 / 四套规则 / 车卡规则 / 存储层 / 复现性），156 项 |
 | `npm run test:smoke` | 端到端接口测试（需先跑起 `npm run serve`），51 项 |
 | `npm run test:multiplayer` | 多人牌桌的权限与推送测试（需先跑起 `npm run serve`），41 项 |
 | `npm run build:huazhu` | 从华渚提取数据重建规则集模块 |
