@@ -1,0 +1,22 @@
+# 依赖与构建产物
+node_modules/
+
+# 包管理器 / Electron 二进制缓存（体积大，可随时重新下载）
+.npm-cache/
+.electron-cache/
+
+# 跑团数据：默认写在这里，包含战役、角色卡与日志
+data/
+*.tmp
+
+# 开发时用到的临时目录
+.shots/
+.smoke/
+.demo/
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
