@@ -488,10 +488,94 @@ test('职业表数值与 SRD 一致', () => {
   const byName = Object.fromEntries(daggerheart.classes.map(c => [c.name, c]));
   assert.equal(byName['战士'].evasion, 11);
   assert.equal(byName['战士'].hp, 6);
-  assert.equal(byName['炽天使'].hp, 7);
+  assert.equal(byName['神使'].hp, 7);
   assert.equal(byName['术士'].hp, 6);
   assert.equal(byName['游荡者'].evasion, 12);
   assert.equal(byName['法师'].hp, 5);
+  assert.equal(daggerheart.classes.length, 9);
+});
+
+test('职业的两个领域用的是官方中文译名', () => {
+  const byName = Object.fromEntries(daggerheart.classes.map(c => [c.name, c]));
+  assert.deepEqual(byName['吟游诗人'].domains, ['优雅', '典籍'], '官方译名是「典籍」不是「法典」');
+  assert.deepEqual(byName['德鲁伊'].domains, ['贤者', '奥术'], '官方译名是「贤者/奥术」不是「智慧/秘法」');
+  assert.deepEqual(byName['法师'].domains, ['典籍', '辉耀']);
+
+  // 所有职业的领域都必须能在领域表里找到
+  const known = new Set(daggerheart.domains.map(d => d.name));
+  for (const c of daggerheart.classes) {
+    for (const dom of c.domains) {
+      assert.ok(known.has(dom), `${c.name} 的领域「${dom}」不在领域表里`);
+    }
+  }
+});
+
+test('每个职业都有两个子职业，且子职业特性分档', () => {
+  for (const c of daggerheart.classes) {
+    assert.equal(c.subclasses.length, 2, `${c.name} 应有 2 个子职业，实际 ${c.subclasses.length}`);
+    for (const s of c.subclasses) {
+      assert.ok(s.name, `${c.name} 的子职业缺名字`);
+      assert.ok(s.spellcastTrait, `${c.name}/${s.name} 缺施法属性`);
+      assert.ok(s.features.length > 0, `${c.name}/${s.name} 没有任何特性`);
+      for (const f of s.features) {
+        assert.ok(f.name, `${c.name}/${s.name} 有特性缺名字`);
+        assert.ok(f.text, `${c.name}/${s.name} 的【${f.name}】缺描述`);
+      }
+    }
+  }
+});
+
+test('血统 18 个种族，每个恰好 2 条特性', () => {
+  assert.equal(daggerheart.ancestries.length, 18);
+  for (const a of daggerheart.ancestries) {
+    assert.equal(a.traits.length, 2, `${a.name} 的特性不是 2 条`);
+    for (const t of a.traits) {
+      assert.ok(t.name, `${a.name} 有特性缺名字`);
+      assert.ok(t.text, `${a.name} 的【${t.name}】缺描述`);
+    }
+  }
+});
+
+test('社群 9 个，每个 1 条特性', () => {
+  assert.equal(daggerheart.communities.length, 9);
+  for (const c of daggerheart.communities) {
+    assert.ok(c.name);
+    assert.ok(c.feature?.name, `${c.name} 缺特性名`);
+    assert.ok(c.feature?.text, `${c.name} 缺特性描述`);
+  }
+});
+
+test('领域 9 个，每个恰好 21 张卡', () => {
+  assert.equal(daggerheart.domains.length, 9);
+  assert.equal(daggerheart.domainCards.length, 189);
+  const counts = {};
+  for (const c of daggerheart.domainCards) counts[c.domain] = (counts[c.domain] || 0) + 1;
+  for (const d of daggerheart.domains) {
+    assert.equal(counts[d.name], 21, `${d.name} 的卡数应为 21，实际 ${counts[d.name]}`);
+  }
+});
+
+test('领域卡字段完整，等级在 1~10', () => {
+  for (const c of daggerheart.domainCards) {
+    assert.ok(c.name, '领域卡缺名字');
+    assert.ok(c.domain, `${c.name} 缺领域`);
+    assert.ok(c.text, `${c.name} 缺描述`);
+    assert.ok(Number.isFinite(c.level) && c.level >= 1 && c.level <= 10, `${c.name} 等级异常：${c.level}`);
+    assert.ok(['能力', '法术', '术典'].includes(c.type), `${c.name} 类型异常：${c.type}`);
+  }
+});
+
+test('职业的领域卡查询可用', () => {
+  const cards = daggerheart.cardsOfDomain('利刃');
+  assert.equal(cards.length, 21);
+  assert.ok(cards.every(c => c.domain === '利刃'));
+  assert.ok(cards[0].level <= cards[cards.length - 1].level, '应按等级升序');
+});
+
+test('车卡可用的领域 = 职业的两个领域', () => {
+  assert.deepEqual(daggerheart.creation.usableDomains('战士'), ['利刃', '骸骨']);
+  assert.deepEqual(daggerheart.creation.usableDomains('法师'), ['典籍', '辉耀']);
+  assert.deepEqual(daggerheart.creation.usableDomains('不存在的职业'), []);
 });
 
 test('护甲表数值与 SRD 一致', () => {
@@ -503,6 +587,51 @@ test('护甲表数值与 SRD 一致', () => {
     { m: byName['锁子甲'].major, s: byName['锁子甲'].severe, sc: byName['锁子甲'].score, e: byName['锁子甲'].evasion },
     { m: 7, s: 15, sc: 4, e: -1 });
   assert.equal(byName['传说全身板甲'].severe, 44);
+});
+
+test('匕首心：能造出完全合规的 1 级角色（含血统 / 社群 / 领域卡）', () => {
+  const data = daggerheart.createDefault('合规英雄');
+  data.className = '游荡者';
+  data.subclass = daggerheart.subclassesOf('游荡者')[0].name;
+  data.level = 1;
+  const cls = daggerheart.classes.find(c => c.name === '游荡者');
+  data.evasionBase = cls.evasion;
+  data.hpMax = cls.hp;
+  data.ancestry = daggerheart.ancestries[0].name;
+  data.community = daggerheart.communities[0].name;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: '街头生存', mod: 2 }, { name: '开锁', mod: 2 }];
+  data.hope = 2;
+  data.stressMax = 6;
+  data.armorSlotsMax = data.armorScore;
+
+  // 领域卡必须来自职业的两个领域
+  const usable = daggerheart.creation.usableDomains('游荡者');
+  const picked = usable.map(name => {
+    const c = daggerheart.cardsOfDomain(name)[0];
+    return { name: c.name, domain: name, level: c.level };
+  });
+  data.domainCards = picked;
+
+  const res = daggerheart.creation.validate(data);
+  assert.deepEqual(res.errors, [], `应无 error：${JSON.stringify(res.errors)}`);
+});
+
+test('匕首心：带了不属于本职领域的卡会被拦下', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '战士';                 // 领域是 利刃 / 骸骨
+  data.subclass = daggerheart.subclassesOf('战士')[0].name;
+  data.evasionBase = 11;
+  data.hpMax = 6;
+  data.traits = { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 };
+  data.experiences = [{ name: 'a', mod: 2 }, { name: 'b', mod: 2 }];
+  data.armorSlotsMax = data.armorScore;
+  data.domainCards = [
+    { name: '越界', domain: '奥术', level: 1 },
+    { name: '越界2', domain: '辉耀', level: 1 },
+  ];
+  const res = daggerheart.creation.validate(data);
+  assert.ok(res.errors.some(e => /不在 战士 的领域/.test(e.message)), JSON.stringify(res.errors));
 });
 
 test('闪避 = 基础 + 护甲修正', () => {

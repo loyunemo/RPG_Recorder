@@ -38,15 +38,17 @@ export function renderSheetView(root, app) {
     ));
   }
 
-  body.appendChild(sheetHeader(app, char, rs, editable));
-
-  // 规则校验：只提示，不阻止保存 —— 主持人随时可以裁定偏离规则
+  // 规则校验：只提示，不阻止保存 —— 主持人随时可以裁定偏离规则。
+  // 注意必须先 append 到 container，再 append body —— 此时 body 还不是 container 的子节点，
+  // 用 insertBefore(panel, body) 会抛 NotFoundError。
   if (editable && rs.creation?.validate) {
     const res = rs.creation.validate(char.data);
     if (res.errors.length || res.warnings.length) {
-      container.insertBefore(ruleCheckPanel(res), body);
+      container.appendChild(ruleCheckPanel(res));
     }
   }
+
+  body.appendChild(sheetHeader(app, char, rs, editable));
 
   if (rs.id === 'coc7') renderCoc7(body, app, char);
   else if (rs.id === 'dnd5e') renderDnd5e(body, app, char);
@@ -249,9 +251,11 @@ function domainCardsCard(app, char, rs) {
 
   const cls = rs.classes.find(c => c.name === d.className);
   const sub = (cls?.subclasses || []).find(s => s.name === d.subclass);
-  const usable = [cls?.domain, sub?.domain]
-    .filter(Boolean)
-    .flatMap(name => String(name).split(/[、,，]|或/).map(x => x.trim()).filter(Boolean));
+
+  // 优先用规则集自己给出的「可用领域」——华渚是法门+宗门，匕首心是职业的两个领域
+  const usable = rs.creation?.usableDomains
+    ? rs.creation.usableDomains(d)
+    : [].concat(cls?.domains || cls?.domain || [], sub?.domain || []);
 
   const domainByName = new Map(rs.domains.map(x => [x.name, x]));
 
@@ -274,7 +278,7 @@ function domainCardsCard(app, char, rs) {
     ...usable.flatMap(name => {
       const dom = domainByName.get(name);
       if (!dom) return [];
-      return [h('optgroup', { label: `${dom.name}（${dom.path}）` },
+      return [h('optgroup', { label: `${dom.name}（${dom.path || '领域'}）` },
         rs.domainCards
           .filter(c => c.domain === dom.id)
           .sort((a, b) => (a.level ?? 99) - (b.level ?? 99))
@@ -282,7 +286,11 @@ function domainCardsCard(app, char, rs) {
     }),
   ]);
 
-  return card(`领域卡（${owned.length} 张）`,
+  const need = 2 + Math.max(0, (d.level || 1) - 1);
+
+  return card(`领域卡（${owned.length} / ${need}）`,
+    h('div.tiny.muted', { style: { marginBottom: '8px' } },
+      usable.length ? `可用领域：${usable.join(' / ')}` : '先选好职业才能看到可选领域卡'),
     h('div', { style: { marginBottom: '9px' } }, picker),
     owned.length
       ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
@@ -305,6 +313,37 @@ function domainCardsCard(app, char, rs) {
         )),
       )
       : h('div.tiny.muted', {}, '还没有领域卡。从上方选择添加。'),
+  );
+}
+
+/**
+ * 血统与社群的特性。
+ * 这两项在匕首心里各给一条固定特性，车卡时必须看得到具体效果。
+ */
+function traitsCard(app, char, rs) {
+  const d = char.data;
+  const anc = (rs.ancestries || []).find(a => a.name === d.ancestry);
+  const com = (rs.communities || []).find(c => c.name === d.community);
+
+  if (!anc && !com) return h('div');
+
+  const block = (title, subtitle, items) => h('div', { style: { marginBottom: '12px' } },
+    h('div', { style: { fontWeight: 600, fontSize: '13.5px', marginBottom: '2px' } }, title),
+    subtitle ? h('div.tiny.muted', { style: { marginBottom: '7px', lineHeight: 1.7 } }, subtitle) : null,
+    ...items.map(f => h('div', {
+      style: {
+        background: 'var(--bg-2)', border: '1px solid var(--border-soft)',
+        borderRadius: 'var(--radius)', padding: '8px 10px', marginBottom: '5px',
+      },
+    },
+      h('div', { style: { fontWeight: 600, fontSize: '12.5px', color: 'var(--accent)' } }, f.name),
+      h('div.tiny.dim', { style: { marginTop: '3px', lineHeight: 1.8 } }, f.text),
+    )),
+  );
+
+  return card('血统与社群特性',
+    anc ? block(`血统 · ${anc.name}`, anc.description, anc.traits) : null,
+    com ? block(`社群 · ${com.name}`, com.description, [com.feature]) : null,
   );
 }
 
@@ -707,16 +746,57 @@ function renderDaggerheart(root, app, char) {
         onchange: (e) => app.saveCharacterNow((data) => {
           const cls = rs.classes.find(c => c.name === e.target.value);
           data.className = e.target.value;
-          if (cls) { data.evasionBase = cls.evasion; data.hpMax = cls.hp; }
+          if (cls) {
+            data.evasionBase = cls.evasion;
+            data.hpMax = cls.hp;
+            data.subclass = cls.subclasses?.[0]?.name || '';
+          }
         }),
-      }, rs.classes.map(c => h('option', { value: c.name, selected: d.className === c.name },
-        `${c.name}（闪避 ${c.evasion} / HP ${c.hp}）`)))),
-      kv('子职业', textInput(d.subclass, (v) => app.saveCharacter((x) => { x.subclass = v; }))),
+      }, rs.classes.map(c => {
+        // 匕首心是 domains 数组，华渚是单个 domain —— 两者都要兼容
+        const doms = c.domains || (c.domain ? [c.domain] : []);
+        return h('option', { value: c.name, selected: d.className === c.name },
+          `${c.name}（${doms.join('/')} · 闪避 ${c.evasion} / HP ${c.hp}）`);
+      }))),
+      kv('子职业', (() => {
+        const subs = rs.subclassesOf ? rs.subclassesOf(d.className) : [];
+        return subs.length
+          ? h('select.select', {
+            onchange: (e) => app.saveCharacterNow((data) => { data.subclass = e.target.value; }),
+          }, subs.map(s => h('option', { value: s.name, selected: d.subclass === s.name }, s.name)))
+          : textInput(d.subclass, (v) => app.saveCharacter((x) => { x.subclass = v; }));
+      })()),
       kv('等级', numInput(d.level, (v) => app.saveCharacter((x) => { x.level = Math.max(1, Math.min(10, v)); }), { min: 1, max: 10 })),
-      kv('血统', textInput(d.ancestry, (v) => app.saveCharacter((x) => { x.ancestry = v; }))),
-      kv('社群', textInput(d.community, (v) => app.saveCharacter((x) => { x.community = v; }))),
+      kv('血统', (() => {
+        const list = rs.ancestries || [];
+        return list.length
+          ? h('select.select', {
+            onchange: (e) => app.saveCharacterNow((data) => { data.ancestry = e.target.value; }),
+          }, [
+            h('option', { value: '', selected: !d.ancestry }, '（请选择）'),
+            ...list.map(a => h('option', { value: a.name, selected: d.ancestry === a.name }, a.name)),
+          ])
+          : textInput(d.ancestry, (v) => app.saveCharacter((x) => { x.ancestry = v; }));
+      })()),
+      kv('社群', (() => {
+        const list = rs.communities || [];
+        return list.length
+          ? h('select.select', {
+            onchange: (e) => app.saveCharacterNow((data) => { data.community = e.target.value; }),
+          }, [
+            h('option', { value: '', selected: !d.community }, '（请选择）'),
+            ...list.map(c => h('option', { value: c.name, selected: d.community === c.name }, c.name)),
+          ])
+          : textInput(d.community, (v) => app.saveCharacter((x) => { x.community = v; }));
+      })()),
     ),
   ));
+
+  /* 血统 / 社群特性 —— 车卡时要看得到具体效果 */
+  root.appendChild(traitsCard(app, char, rs));
+
+  /* 领域卡 */
+  root.appendChild(domainCardsCard(app, char, rs));
 
   /* 护甲 */
   const armorSel = h('select.select', {

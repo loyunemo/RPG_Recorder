@@ -1,0 +1,12 @@
+/** 由 scripts/build-data.cjs 从 source.json 生成，请勿手改 */
+export default {
+ "note": "本目录数据由 scripts/import-dhsheet.cjs 从 DHSheet 的卡牌数据转换而来，请勿手改。",
+ "upstream": "https://github.com/RidRisR/DaggerHeart-CharacterSheet",
+ "upstreamFile": "data/cards/builtin-base.json",
+ "upstreamName": "系统内置卡牌包",
+ "upstreamVersion": "V20251114",
+ "upstreamDescription": "系统内置卡牌包,数据来自官方SRD，修订自6月27日的版本。",
+ "upstreamAuthors": "RidRisR,PolearmMaster,末楔,里予,一得",
+ "importedAt": "2026-09-23T16:20:47.838Z",
+ "license": "卡牌内容派生自 Daggerheart SRD 1.0（© Critical Role, LLC.，DPCGL 授权）；上游仓库以 GPL-3.0 发布，中文翻译由 RidRisR、PolearmMaster、末楔、里予、一得完成。"
+};

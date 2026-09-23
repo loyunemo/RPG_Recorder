@@ -155,28 +155,62 @@ const dh = store.createCampaign({
 });
 const dhSession = store.createSession(dh.id, { name: '第一幕：敲门的東西' });
 
+// 用官方车卡数据填充演示角色，顺便验证血统 / 社群 / 领域卡确实接通了
+const dhDemo = (() => {
+  try {
+    const rules = require(path.join(__dirname, '..', 'src', 'core', 'rulesets', 'daggerheart', 'data', 'classes.json'));
+    const anc = require(path.join(__dirname, '..', 'src', 'core', 'rulesets', 'daggerheart', 'data', 'ancestries.json'));
+    const com = require(path.join(__dirname, '..', 'src', 'core', 'rulesets', 'daggerheart', 'data', 'communities.json'));
+    const dom = require(path.join(__dirname, '..', 'src', 'core', 'rulesets', 'daggerheart', 'data', 'domains.json'));
+
+    const cls = rules.classes.find(c => c.name === '战士') || rules.classes[0];
+    const pick = (name) => dom.cards.find(c => c.domain === name && c.level === 1);
+    const cards = (cls.domains || [])
+      .map(d => pick(d))
+      .filter(Boolean)
+      .map(c => ({ name: c.name, domain: c.domain, level: c.level, text: c.text }));
+
+    return {
+      className: cls.name,
+      subclass: cls.subclasses[0]?.name || '',
+      ancestry: anc.ancestries[0]?.name || '',
+      community: com.communities[0]?.name || '',
+      evasionBase: cls.evasion,
+      hpMax: cls.hp,
+      classItems: cls.classItems,
+      domainCards: cards,
+    };
+  } catch (err) {
+    console.warn('  （匕首心数据未构建，演示角色改用最小字段：' + err.message + '）');
+    return null;
+  }
+})();
+
 const dhChar = store.saveCharacter(dh.id, {
   name: '莉安·半月', system: 'daggerheart',
   data: {
-    name: '莉安·半月', pronouns: '她', className: '战士', subclass: '勇者之召', level: 1,
-    ancestry: '人类', community: '高地人',
-    traits: { agility: 1, strength: 2, finesse: 0, instinct: 0, presence: -1, knowledge: 1 },
-    evasionBase: 11, armorName: '皮甲', armorScore: 3, armorEvasion: 0,
+    name: '莉安·半月', pronouns: '她', level: 1,
+    className: dhDemo?.className ?? '战士',
+    subclass: dhDemo?.subclass ?? '勇气呼唤',
+    ancestry: dhDemo?.ancestry ?? '人类',
+    community: dhDemo?.community ?? '高城之民',
+    traits: { agility: 2, strength: 1, finesse: 1, instinct: 0, presence: 0, knowledge: -1 },
+    evasionBase: dhDemo?.evasionBase ?? 11, armorName: '皮甲', armorScore: 3, armorEvasion: 0,
     majorThreshold: 6, severeThreshold: 13,
-    hpMax: 6, hpMarked: 2, stressMax: 6, stressMarked: 1,
-    armorSlotsMax: 3, armorMarked: 1, hope: 3, fear: 2,
+    hpMax: dhDemo?.hpMax ?? 6, hpMarked: 2, stressMax: 6, stressMarked: 1,
+    armorSlotsMax: 3, armorMarked: 1, hope: 2, fear: 2,
     experiences: [
       { name: '边境守卫', mod: 2 },
       { name: '读懂人心', mod: 2 },
-      { name: '野外求生', mod: 2 },
+      { name: '', mod: 2 },
       { name: '', mod: 2 },
     ],
     weapons: [
       { name: '双手大剑', damage: '2d10', trait: '力量', note: '近战 · 双手' },
       { name: '手斧', damage: '1d8', trait: '力量', note: '近战 · 可投掷' },
     ],
-    domainCards: ['利刃：破阵斩', '骸骨：不屈', '利刃：猛击'],
-    inventory: '冒险者行囊、磨刀石、家族徽记、3 枚金币、干粮 5 份',
+    domainCards: dhDemo?.domainCards ?? [],
+    inventory: `${dhDemo?.classItems || ''}冒险者行囊、磨刀石、家族徽记、3 枚金币、干粮 5 份`.trim(),
     notes: '',
   },
 }, { sessionId: dhSession.id });

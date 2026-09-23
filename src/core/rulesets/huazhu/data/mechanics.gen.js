@@ -1,4 +1,4 @@
-/** 由 scripts/build-huazhu-data.cjs 从 mechanics.json 生成，请勿手改 */
+/** 由 scripts/build-data.cjs 从 mechanics.json 生成，请勿手改 */
 export default {
   "tiers": [
     {

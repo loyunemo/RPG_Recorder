@@ -9,6 +9,11 @@
  */
 
 import { validator, makeBudgets } from '../creation.js';
+import classesData from './daggerheart/data/classes.gen.js';
+import ancestriesData from './daggerheart/data/ancestries.gen.js';
+import communitiesData from './daggerheart/data/communities.gen.js';
+import domainsData from './daggerheart/data/domains.gen.js';
+import sourceData from './daggerheart/data/source.gen.js';
 
 export const DH_TRAITS = [
   { key: 'agility', label: '敏捷', abbr: 'AGI' },
@@ -62,17 +67,43 @@ export const DH_ARMORS = [
   { name: '维里塔斯猫眼石甲', tier: 4, major: 13, severe: 36, score: 6, evasion: 0, feature: '求真：附近生物说谎时发光' },
 ];
 
-export const DH_CLASSES = [
-  { name: '吟游诗人', evasion: 10, hp: 5, domains: ['优雅', '法典'] },
-  { name: '德鲁伊', evasion: 10, hp: 6, domains: ['智慧', '秘法'] },
-  { name: '守护者', evasion: 9, hp: 7, domains: ['勇气', '利刃'] },
-  { name: '游侠', evasion: 12, hp: 6, domains: ['骸骨', '智慧'] },
-  { name: '游荡者', evasion: 12, hp: 6, domains: ['午夜', '优雅'] },
-  { name: '炽天使', evasion: 9, hp: 7, domains: ['辉耀', '勇气'] },
-  { name: '术士', evasion: 10, hp: 6, domains: ['秘法', '午夜'] },
-  { name: '战士', evasion: 11, hp: 6, domains: ['利刃', '骸骨'] },
-  { name: '法师', evasion: 11, hp: 5, domains: ['法典', '辉耀'] },
-];
+/**
+ * 职业数据来自 DHSheet 的卡牌表（派生自官方 SRD 的中文翻译）。
+ * 这里保留完整字段；下游用得到的 name / evasion / hp / domains 都在。
+ */
+export const DH_CLASSES = classesData.classes;
+
+/** 血统：18 个种族，每个 2 条特性 */
+export const DH_ANCESTRIES = ancestriesData.ancestries;
+
+/** 社群：9 个，每个 1 条特性 */
+export const DH_COMMUNITIES = communitiesData.communities;
+
+/** 领域与领域卡：9 个领域，每个 21 张卡 */
+export const DH_DOMAINS = domainsData.domains;
+export const DH_DOMAIN_CARDS = domainsData.cards;
+
+/** 数据来源与署名 */
+export const DH_DATA_SOURCE = sourceData;
+
+const DH_CLASS_BY_NAME = new Map(DH_CLASSES.map(c => [c.name, c]));
+
+/** 某个职业的两个领域 */
+export function domainsOfClass(className) {
+  return DH_CLASS_BY_NAME.get(className)?.domains || [];
+}
+
+/** 某个职业的子职业 */
+export function subclassesOf(className) {
+  return DH_CLASS_BY_NAME.get(className)?.subclasses || [];
+}
+
+/** 某个领域下的领域卡，按等级排序 */
+export function cardsOfDomain(domainName) {
+  return DH_DOMAIN_CARDS
+    .filter(c => c.domain === domainName)
+    .sort((a, b) => (a.level ?? 99) - (b.level ?? 99));
+}
 
 /** 伤害严重程度 */
 export function damageSeverity(total, major, severe) {
@@ -405,12 +436,33 @@ function creationValidate(data) {
   const cards = data.domainCards || [];
   if (cards.length < needCards) v.error('domainCards', `${level} 级应有 ${needCards} 张领域卡，当前 ${cards.length} 张`);
 
+  // 领域卡只能从职业的两个领域里选
+  const usable = domainsOfClass(data.className);
+  if (usable.length) {
+    const bad = cards.filter(c => c.domain && !usable.includes(c.domain));
+    if (bad.length) {
+      v.error('domainCards', `这些领域卡不在 ${data.className} 的领域（${usable.join(' / ')}）内：`
+        + bad.map(c => `${c.name}（${c.domain}）`).join('、'));
+    }
+  }
+
+  // 血统与社群
+  if (!data.ancestry) v.warn('ancestry', '还没选择血统');
+  else if (!DH_ANCESTRIES.some(a => a.name === data.ancestry)) {
+    v.warn('ancestry', `「${data.ancestry}」不在内置血统表里`);
+  }
+  if (!data.community) v.warn('community', '还没选择社群');
+  else if (!DH_COMMUNITIES.some(c => c.name === data.community)) {
+    v.warn('community', `「${data.community}」不在内置社群表里`);
+  }
+
   return v.result;
 }
 
 export const DH_CREATION = {
   summary: '起始六项属性从固定数组（+2 / +1 / +1 / 0 / 0 / −1）里各取一次分配；'
-    + '职业决定起始闪避与生命点，1 级带 2 条经历与 2 张领域卡，起始希望 2 点、压力上限 6 格。',
+    + '职业决定起始闪避、生命点与两个领域，1 级带 2 条经历与 2 张领域卡，'
+    + '起始希望 2 点、压力上限 6 格。',
   traits: {
     keys: DH_TRAITS.map(t => t.key),
     labels: Object.fromEntries(DH_TRAITS.map(t => [t.key, `${t.label} ${t.abbr}`])),
@@ -418,13 +470,16 @@ export const DH_CREATION = {
   },
   fields: [
     { key: 'className', label: '职业', type: 'select', options: DH_CLASSES.map(c => c.name) },
+    { key: 'subclass', label: '子职业', type: 'select', dependsOn: 'className' },
     { key: 'level', label: '等级', type: 'number', min: 1, max: 10, default: 1 },
-    { key: 'ancestry', label: '血统', type: 'text' },
-    { key: 'community', label: '社群', type: 'text' },
+    { key: 'ancestry', label: '血统', type: 'select', options: DH_ANCESTRIES.map(a => a.name) },
+    { key: 'community', label: '社群', type: 'select', options: DH_COMMUNITIES.map(c => c.name) },
   ],
   budgets: creationBudgets,
   validate: creationValidate,
   traitSet: TRAIT_SET,
+  usableDomains: domainsOfClass,
+  subclassesOf,
 };
 
 export default {
@@ -448,4 +503,13 @@ export default {
   damageSeverity,
   initiative,
   creation: DH_CREATION,
+  /* 车卡数据（来自 DHSheet 的 SRD 中文卡表） */
+  ancestries: DH_ANCESTRIES,
+  communities: DH_COMMUNITIES,
+  domains: DH_DOMAINS,
+  domainCards: DH_DOMAIN_CARDS,
+  domainsOfClass,
+  subclassesOf,
+  cardsOfDomain,
+  dataSource: DH_DATA_SOURCE,
 };

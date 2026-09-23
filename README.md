@@ -265,9 +265,17 @@ export default {
 程序代码以 [MIT 许可](LICENSE) 发布。
 但**内置的游戏规则数据另有归属，不受 MIT 约束**，完整声明见 [LICENSE](LICENSE) 末尾。
 
-「匕首心」的护甲、职业等规则数据取自
+「匕首心」的护甲、武器、职业等规则数据取自
 [Daggerheart System Reference Document 1.0](https://www.daggerheart.com/)，
 © Critical Role, LLC.，依 Darrington Press Community Gaming (DPCGL) License 使用。
+
+其中的**中文卡表**（血统 18 / 社群 9 / 职业 9 / 子职业 18 / 领域卡 189）
+转换自 [DHSheet · 匕首之心车卡器](https://dhsheet.site/)
+（[源码仓库](https://github.com/RidRisR/DaggerHeart-CharacterSheet)，作者 RidRisR），
+其数据自述「来自官方 SRD」，中文翻译由 **RidRisR、PolearmMaster、末楔、里予、一得** 完成。
+上游仓库以 GPL-3.0 发布，本项目在此保留完整署名。
+转换脚本见 `scripts/import-dhsheet.cjs`，数据来源与版本记录在
+`src/core/rulesets/daggerheart/data/source.json`。
 
 「华渚」中式奇幻匕首之心框架的世设、法门、领域、种族等全部内容，
 著作权归原作者**【虚拟人】（QQ: 541521184）**所有，明确为非商业用途创作。
