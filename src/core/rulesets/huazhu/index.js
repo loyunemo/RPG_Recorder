@@ -176,6 +176,9 @@ function createDefault(name = '新修行者') {
     /** 已获得的领域卡 */
     domainCards: [],
 
+    /** 战斗中可执行的行动 */
+    actions: [],
+
     weapons: [],
     inventory: '',
     notes: '',
@@ -393,6 +396,22 @@ function creationValidate(data) {
   return v.result;
 }
 
+/**
+ * 行动预设：沿用匕首心的那一套，另加华渚特有的炁与修真手段。
+ * check 会被直接交给 roll()，与判定面板的写法一致。
+ */
+export const HUAZHU_ACTION_PRESETS = [
+  ...daggerheart.actionPresets.map(p => ({ ...p })),
+  { name: '运炁（斗气）', kind: 'action', target: 'enemy', check: { targetKey: 'trait:strength' }, damage: '1d10', cost: { stress: 1 }, note: '灌注斗气的刚猛一击' },
+  { name: '驭炁（真气）', kind: 'action', target: 'enemy', check: { targetKey: 'spellcast' }, note: '以心法引导真气' },
+  { name: '御剑', kind: 'action', target: 'enemy', check: { targetKey: 'trait:finesse' }, damage: '1d8', note: '剑修的飞剑手段' },
+  { name: '布阵', kind: 'action', target: 'area', check: { targetKey: 'trait:knowledge' }, note: '结阵派的手段，为全队创造优势' },
+  { name: '丹术', kind: 'action', target: 'ally', check: { targetKey: 'trait:knowledge' }, note: '以丹药救人' },
+  { name: '观气', kind: 'action', target: 'none', check: { targetKey: 'trait:instinct' }, note: '辨明对手的修为与路数' },
+  { name: '九玄技', kind: 'action', target: 'enemy', note: '动用已领悟的九玄技，具体效果由主持人裁定' },
+  { name: '道心自问', kind: 'action', target: 'self', note: '动用道心经历，原文注明无需花费希望点' },
+];
+
 export const HUAZHU_CREATION = {
   summary: '在匕首之心的车卡基础上，法门决定第一个领域与闪避/生命点，'
     + '宗门流派再给出第二个领域、施法属性与初始物品；领域卡只能从这两个领域里选。',
@@ -448,6 +467,7 @@ export default {
   damageSeverity,
   initiative,
   creation: HUAZHU_CREATION,
+  actionPresets: HUAZHU_ACTION_PRESETS,
   tierFor,
   reputationBand,
   subclassesOf,

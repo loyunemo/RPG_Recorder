@@ -78,6 +78,8 @@ function createDefault(name = '新冒险者') {
       deathSuccess: 0, deathFail: 0,
     },
     spell: { ability: 'int', slotsUsed: {}, prepared: '', notes: '' },
+    /** 战斗中可执行的行动 */
+    actions: [],
     weapons: [],
     gear: '',
     features: '',
@@ -549,6 +551,35 @@ function creationValidate(data) {
 
 const ALL_SKILL_LABELS = new Set(DND_SKILLS.map(s => s.label));
 
+/** 行动预设。战斗轮到这个角色时，只能从已声明的行动里挑一个来结算。 */
+export const DND_ACTION_PRESETS = [
+  { name: '攻击', kind: 'action', target: 'enemy', check: { targetKey: 'ability:str' }, damage: '1d8+STR', note: '用长剑等力量武器攻击（改武器骰或换成 DEX 即可适用灵巧/远程武器）' },
+  { name: '施法', kind: 'action', target: 'enemy', check: { targetKey: 'spellAttack' }, note: '施放一个法术' },
+  { name: '疾跑', kind: 'action', target: 'self', note: '本回合获得额外移动力' },
+  { name: '脱离', kind: 'action', target: 'self', note: '本回合的移动不引发借机攻击' },
+  { name: '闪避', kind: 'action', target: 'self', note: '本回合针对你的攻击具有劣势' },
+  { name: '协助', kind: 'action', target: 'ally', note: '给盟友下一次检定一次优势' },
+  { name: '隐藏', kind: 'action', target: 'self', check: { targetKey: 'skill:stealth' } },
+  { name: '搜索', kind: 'action', target: 'none', check: { targetKey: 'skill:investigation' } },
+  { name: '准备', kind: 'action', target: 'none', note: '设定触发条件，届时用反应执行' },
+  { name: '使用物品', kind: 'action', target: 'none' },
+  { name: '附赠：二次攻击', kind: 'bonus', target: 'enemy', check: { targetKey: 'ability:str' }, damage: '1d8+STR' },
+  { name: '借机攻击', kind: 'reaction', target: 'enemy', check: { targetKey: 'ability:str' }, damage: '1d8+STR' },
+];
+
+/**
+ * 伤害骰式里的符号取值。预设写 `1d8+STR`，这里给出该角色当前的力量调整值。
+ * 调整值自带正负号，展开时和模板里的运算符合并。
+ */
+export function damageVars(data) {
+  const ab = data?.abilities || {};
+  const signed = (key) => {
+    const m = abilityMod(ab[key] ?? 10);
+    return m >= 0 ? `+${m}` : `${m}`;
+  };
+  return { STR: signed('str'), DEX: signed('dex') };
+}
+
 export const DND_CREATION = {
   summary: '属性用「标准数组 / 点数购买 / 4d6 弃最低」三选一，再叠加种族加值；'
     + '职业决定生命骰、两项豁免熟练与可选技能数量，1 级生命值取生命骰满值加体质调整值。',
@@ -601,6 +632,8 @@ export default {
   deathSave,
   initiative,
   creation: DND_CREATION,
+  actionPresets: DND_ACTION_PRESETS,
+  damageVars,
   abilityMod,
   proficiencyBonus,
 };

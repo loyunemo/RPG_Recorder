@@ -3,6 +3,10 @@
 import { h, render, numInput, textInput, toast, confirmDialog } from '../util.js';
 import { setTrackValue } from '../characterOps.js';
 import { platform } from '../platform.js';
+import {
+  blankAction, actionFromPreset, normalizeActions,
+  kindsFor, describeCost, ACTION_TARGETS,
+} from '../../core/actions.js';
 
 export function renderSheetView(root, app) {
   const char = app.selectedCharacter();
@@ -56,6 +60,7 @@ export function renderSheetView(root, app) {
   else renderDaggerheart(body, app, char);
 
   body.appendChild(notesCard(app, char));
+  body.appendChild(actionsCard(app, char, rs));
   container.appendChild(body);
   return container;
 }
@@ -95,6 +100,156 @@ function ruleCheckPanel(res, onFix) {
   }
 
   return box;
+}
+
+/**
+ * 行动面板。
+ *
+ * 战斗轮到这个角色时，只能从这组行动里挑一个来结算 ——
+ * 所以这里既是编辑器，也是战斗中那个「行动条」的数据来源。
+ */
+function actionsCard(app, char, rs) {
+  const list = normalizeActions(char.data.actions);
+  const kinds = kindsFor(rs.id);
+
+  /* 可选判定目标，做成下拉方便指到具体技能 */
+  const targetOptions = (() => {
+    const groups = rs.rollTargets ? rs.rollTargets(char.data) : [];
+    const out = [{ value: '', label: '（不判定）' }];
+    for (const g of groups) {
+      for (const it of g.items) {
+        out.push({ value: it.key, label: `${g.title}｜${it.label}`, value_: it });
+      }
+    }
+    return out;
+  })();
+
+  const commit = (mutate) => app.saveCharacterNow((data) => {
+    data.actions = normalizeActions(data.actions);
+    mutate(data.actions);
+  });
+
+  /* 已声明的行动 */
+  const rows = list.map((act, i) => {
+    const kind = kinds.find(k => k.id === act.kind);
+    const checkLabel = act.check?.targetLabel
+      || targetOptions.find(o => o.value === act.check?.targetKey)?.label?.split('｜')[1]
+      || '';
+
+    return h('div', {
+      style: {
+        background: 'var(--bg-2)', border: '1px solid var(--border-soft)',
+        borderRadius: 'var(--radius)', padding: '9px 11px', marginBottom: '6px',
+      },
+    },
+      h('div.row.wrap', { style: { gap: '7px', alignItems: 'center' } },
+        h('span', { style: { fontWeight: 600, fontSize: '13px' } }, act.name),
+        h('span.badge', {}, kind?.label || act.kind),
+        h('span.tiny.muted', {},
+          [checkLabel, act.damage ? `伤害 ${act.damage}` : '', describeCost(act.cost) ? `消耗 ${describeCost(act.cost)}` : '']
+            .filter(Boolean).join(' · ') || '无判定'),
+        h('div.spacer'),
+        h('button.btn.sm.ghost', {
+          title: '删除这个行动',
+          onclick: () => commit(a => { a.splice(i, 1); }),
+        }, '✕'),
+      ),
+
+      /* 展开的编辑区 */
+      h('div', { style: { marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' } },
+        h('div.row.wrap', { style: { gap: '6px' } },
+          h('input.input', {
+            value: act.name, placeholder: '行动名', style: { flex: '1', minWidth: '120px' },
+            onchange: (e) => commit(a => { a[i].name = e.target.value; }),
+          }),
+          h('select.select', {
+            style: { width: '118px' },
+            onchange: (e) => commit(a => { a[i].kind = e.target.value; }),
+          }, kinds.map(k => h('option', { value: k.id, selected: act.kind === k.id }, k.label))),
+          h('select.select', {
+            style: { width: '118px' },
+            onchange: (e) => commit(a => { a[i].target = e.target.value; }),
+          }, ACTION_TARGETS.map(t => h('option', { value: t.id, selected: act.target === t.id }, t.label))),
+        ),
+
+        h('div.row.wrap', { style: { gap: '6px' } },
+          h('span.tiny.dim', { style: { width: '54px', alignSelf: 'center' } }, '判定目标'),
+          h('select.select', {
+            style: { flex: '1', minWidth: '150px' },
+            onchange: (e) => commit(a => {
+              const picked = targetOptions.find(o => o.value === e.target.value);
+              a[i].check = picked && picked.value_
+                ? { targetKey: picked.value, targetLabel: picked.value_.label }
+                : {};
+            }),
+          }, targetOptions.map(o => h('option', {
+            value: o.value, selected: (act.check?.targetKey || '') === o.value,
+          }, o.label))),
+        ),
+
+        h('div.row.wrap', { style: { gap: '6px' } },
+          h('span.tiny.dim', { style: { width: '54px', alignSelf: 'center' } }, '伤害骰'),
+          h('input.input.mono', {
+            value: act.damage, placeholder: '留空则不掷伤害，例如 1d8+3',
+            style: { flex: '1', minWidth: '140px' },
+            onchange: (e) => commit(a => { a[i].damage = e.target.value.trim(); }),
+          }),
+        ),
+
+        h('div.row.wrap', { style: { gap: '6px' } },
+          h('span.tiny.dim', { style: { width: '54px', alignSelf: 'center' } }, '备注'),
+          h('input.input', {
+            value: act.note, placeholder: '效果说明（会写进日志）',
+            style: { flex: '1', minWidth: '160px' },
+            onchange: (e) => commit(a => { a[i].note = e.target.value; }),
+          }),
+        ),
+      ),
+    );
+  });
+
+  /* 预设挑选 */
+  const presets = rs.actionPresets || [];
+  const presetInfo = h('div.tiny.muted', { style: { marginTop: '6px' } });
+
+  const picker = h('select.select', {
+    style: { flex: '1', minWidth: '170px' },
+    onchange: (e) => {
+      const p = presets.find(x => x.name === e.target.value);
+      if (!p) return;
+      commit(a => { a.push(actionFromPreset(p)); });
+      e.target.value = '';
+    },
+  }, [
+    h('option', { value: '' }, `＋ 从预设添加（${presets.length} 个）…`),
+    ...presets.map(p => h('option', { value: p.name }, `${p.name}${p.damage ? `（${p.damage}）` : ''}`)),
+  ]);
+
+  return card(`行动（${list.length}）`,
+    h('div.tiny.muted', { style: { marginBottom: '9px', lineHeight: 1.8 } },
+      '战斗中轮到这名角色时，只能从下面这些行动里挑一个来结算。'),
+    ...rows,
+    list.length ? null : h('div.tiny.muted', { style: { marginBottom: '8px' } }, '还没有声明任何行动。'),
+    h('div.row.wrap', {},
+      picker,
+      h('button.btn.sm', {
+        onclick: () => {
+          commit(a => { a.push(blankAction({ name: '新行动' })); });
+          presetInfo.textContent = '已添加空白行动，请填写判定目标与伤害骰';
+        },
+      }, '＋ 自定义行动'),
+      h('button.btn.sm.ghost', {
+        title: '把该系统的常用行动一次全加上',
+        onclick: async () => {
+          const ok = await confirmDialog('添加全部预设',
+            `将把「${rs.short}」的 ${presets.length} 个常用行动全部加进来，之后可以逐个删改。`, '全部添加');
+          if (!ok) return;
+          commit(a => { for (const p of presets) a.push(actionFromPreset(p)); });
+        },
+      }, '全部预设'),
+    ),
+    presetInfo,
+  );
 }
 
 /* ────────────────────────── 华渚（匕首之心扩展） ────────────────────────── */

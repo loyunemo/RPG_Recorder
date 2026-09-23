@@ -38,3 +38,4 @@ build/*.icns
 .idea/
 .DS_Store
 Thumbs.db
+.git-commit-msg.txt

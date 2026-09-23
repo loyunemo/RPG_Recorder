@@ -525,7 +525,84 @@ function createWindow() {
           const cls = await js(`return document.querySelector('select.select')?.options?.length || 0;`);
           console.log('[shot] 法门下拉项数：', cls);
         }
+        // 给每张角色卡都加上该系统的一个预设行动，好让战斗里的行动条有内容
+        const pcCount = await js(`return document.querySelectorAll('.pc-card').length;`);
+        for (let p = 0; p < (pcCount || 0); p++) {
+          await js(`document.querySelectorAll('.pc-card')[${p}]?.click(); return true;`);
+          await waitFor(`[...document.querySelectorAll('.card h3')].some(x => x.textContent.startsWith('行动'))`, 8000);
+          await sleep(300);
+          const picked = await js(`
+            const card = [...document.querySelectorAll('.card')]
+              .find(c => c.querySelector('h3')?.textContent.startsWith('行动'));
+            if (!card) return null;
+            const sel = [...card.querySelectorAll('select.select')]
+              .find(s => [...s.options].some(o => o.textContent.startsWith('＋ 从预设添加')));
+            if (!sel) return null;
+            const opt = [...sel.options].find(o => o.value);
+            if (!opt) return null;
+            sel.value = opt.value;
+            sel.dispatchEvent(new Event('change'));
+            return opt.value;`);
+          await sleep(500);
+          if (p === 0) console.log(`[shot] 角色卡行动预设：${pcCount} 张卡，首个添加「${picked}」`);
+        }
+        await sleep(400);
         await shoot(`${c}-sheet-${sys}`);
+
+        // 回到战斗页：行动条应该有内容，且能按下并写进日志
+        await clickTab(1);
+        await sleep(600);
+        const bar = await js(`
+          const btns = [...document.querySelectorAll('.action-btn')];
+          return { count: btns.length, names: btns.map(b => b.dataset.action).slice(0, 4).join(' / ') };`);
+        // 当前行动者可能没声明行动（比如刚加进来的杂兵），往后翻几个回合找一个有的
+        let turns = 0;
+        while (!(await js(`return document.querySelectorAll('.action-btn').length > 0;`)) && turns < 8) {
+          await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('下一回合'))?.click(); return true;`);
+          await sleep(450);
+          turns++;
+        }
+        const nowOn = await js(`
+          const btns = [...document.querySelectorAll('.action-btn')];
+          return { count: btns.length, names: btns.map(b => b.dataset.action).slice(0, 4).join(' / ') };`);
+        console.log(`[shot] 行动条按钮：开局 ${bar?.count ?? 0} 个，跳过 ${turns} 个回合后 ${nowOn?.count ?? 0} 个`
+          + `${nowOn?.names ? ' → ' + nowOn.names : ''}`);
+        const before = await js(`return document.body.innerText;`);
+        const used = await js(`
+          const b = document.querySelector('.action-btn');
+          if (!b) return null;
+          b.click();
+          return b.dataset.action;`);
+        await sleep(1300);
+        const after = await js(`return document.body.innerText;`);
+        const logged = await js(`return document.querySelector('.log-item .l-title')?.textContent || '';`);
+        console.log(`[shot] 按下行动「${used}」，最新日志：${logged || '（无）'}`);
+        console.log('[shot] 结算后界面发生变化：', before !== after ? '是' : '否');
+        const spent = await js(`
+          const all = [...document.querySelectorAll('.action-btn')];
+          return {
+            total: all.length,
+            spent: all.filter(b => b.dataset.spent === '1').length,
+            disabled: all.filter(b => b.disabled).length,
+          };`);
+        console.log(`[shot] 用掉后行动条：${spent?.total ?? 0} 个按钮，其中已用 ${spent?.spent ?? 0} 个（禁用 ${spent?.disabled ?? 0} 个）`);
+        await shoot(`${c}-actionbar`);
+
+        // 推一个回合，行动经济应该刷新回来
+        await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('下一回合'))?.click(); return true;`);
+        await sleep(600);
+        const after2 = await js(`
+          const all = [...document.querySelectorAll('.action-btn')];
+          return all.filter(b => b.dataset.spent === '1').length;`);
+        console.log('[shot] 推进回合后仍在「已用」状态的按钮：', after2);
+
+        // 战斗进行中，判定页应被收敛为「只能从已声明的行动里选」
+        await clickTab(0);
+        await sleep(500);
+        const locked = await js(
+          `return document.body.innerText.includes('战斗中的判定只能通过它声明的行动来结算') ? '已锁定' : '未锁定';`);
+        console.log('[shot] 判定页战斗锁定：', locked);
+        await shoot(`${c}-dice-locked`);
 
         await clickTab(3);
         await sleep(500);

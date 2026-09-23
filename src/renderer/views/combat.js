@@ -9,7 +9,15 @@ import { h, render, toast, confirmDialog } from '../util.js';
 import { rollExpr } from '../../core/dice.js';
 import { getRuleset } from '../../core/rulesets/index.js';
 import { platform } from '../platform.js';
-import { combatantFromCharacter, blankCombatant, setTrackValue, getTrack } from '../characterOps.js';
+import {
+  combatantFromCharacter, blankCombatant, setTrackValue, getTrack,
+  combatantActions, combatantData,
+} from '../characterOps.js';
+import {
+  actionFromPreset, describeAction, describeActionResult, describeCost,
+  resolveAction, kindsFor, normalizeActions, expandDamageExpr,
+  canUseKind, markKindUsed, refreshUsage, scopeOf,
+} from '../../core/actions.js';
 
 const COMMON_CONDITIONS = ['中毒', '麻痹', '束缚', '目盲', '恐惧', '流血', '倒地', '隐身', '加速'];
 
@@ -140,6 +148,7 @@ function controlCard(app, combat) {
           c.active = true;
           c.round = 1;
           c.turnIndex = 0;
+          c.used = {};   // 行动经济从头算起
           // 还没掷先攻的先统一掷掉，避免开局卡住
           if (c.combatants.some(x => x.initiative == null)) rollAllInitiative(app, c, false);
         });
@@ -153,7 +162,7 @@ function controlCard(app, combat) {
       onclick: async () => {
         const ok = await confirmDialog('结束战斗', '战斗状态会被清空（参战者列表保留）。确定结束吗？', '结束战斗');
         if (!ok) return;
-        app.updateCombat((c) => { c.active = false; c.round = 1; c.turnIndex = 0; });
+        app.updateCombat((c) => { c.active = false; c.round = 1; c.turnIndex = 0; c.used = {}; });
         app.addEvent({
           type: 'combat',
           title: `战斗结束（共 ${combat.round} 回合）`,
@@ -170,7 +179,9 @@ function controlCard(app, combat) {
   row.appendChild(h('button.btn', {
     disabled: !list.length,
     onclick: () => {
-      app.updateCombat((c) => { c.round = 1; c.turnIndex = 0; c.combatants.forEach(x => { x.defeated = false; }); });
+      app.updateCombat((c) => {
+        c.round = 1; c.turnIndex = 0; c.combatants.forEach(x => { x.defeated = false; }); c.used = {};
+      });
       app.addEvent({ type: 'combat', title: '重置战斗', detail: '回合归 1，倒地标记已清除' });
     },
   }, '重置回合'));
@@ -191,10 +202,175 @@ function controlCard(app, combat) {
       ),
       h('div.tiny.muted', {}, `先攻 ${current.initiative ?? '—'} · ${current.defenseLabel} ${current.defense ?? '—'} · 生命 ${current.hp}/${current.maxHp}`),
       current.conditions ? h('div.tiny', { style: { color: 'var(--warn)', marginTop: '3px' } }, `状态：${current.conditions}`) : null,
+      actionBar(app, combat, current, list),
     ));
   }
 
   return h('div.card', {}, head, body);
+}
+
+/* ────────────────────────── 行动条 ────────────────────────── */
+
+/**
+ * 当前行动者可用的行动。
+ *
+ * 这里是「只能根据角色动作来」这条约束的落点：
+ * 战斗进行中，结算入口只有这一排按钮，来源是行动者自己声明的行动组。
+ */
+function actionBar(app, combat, actor, list) {
+  const rs = app.ruleset();
+  const actions = combatantActions(app, actor);
+  const kinds = kindsFor(rs.id);
+
+  const others = list.filter(c => c.id !== actor.id);
+  // 默认瞄准第一个还站着的敌人；没有就退而选第一个目标
+  const defaultTarget = others.find(c => !c.defeated) || others[0] || null;
+
+  const targetSel = h('select.select', {
+    style: { flex: '1', minWidth: '130px' },
+    onchange: (e) => { targetSel.dataset.picked = e.target.value; },
+  }, others.length
+    ? others.map(c => h('option', {
+      value: c.id,
+      selected: defaultTarget && c.id === defaultTarget.id,
+    }, `${c.name}（${c.defenseLabel} ${c.defense ?? '—'}${c.defeated ? ' · 已倒地' : ''}）`))
+    : [h('option', { value: '' }, '（场上没有其他参战者）')]);
+  if (defaultTarget) targetSel.dataset.picked = defaultTarget.id;
+
+  const wrap = h('div', {
+    style: {
+      marginTop: '11px', paddingTop: '11px',
+      borderTop: '1px dashed var(--border)',
+    },
+  });
+
+  wrap.appendChild(h('div.row', { style: { marginBottom: '8px' } },
+    h('span.tiny.dim', { style: { flex: '0 0 auto' } }, '目标'),
+    targetSel,
+  ));
+
+  if (!actions.length) {
+    wrap.appendChild(h('div.tiny.muted', { style: { lineHeight: 1.8 } },
+      '这名参战者还没有声明任何行动。',
+      actor.kind === 'pc'
+        ? '到它的角色卡 →「行动」里添加。'
+        : '移除后重新添加，或在添加时选择行动。'));
+    return wrap;
+  }
+
+  /* 按行动经济分组；已经用掉的那一类会置灰，仿照 BG3 的状态栏 */
+  const usage = combat.used || {};
+  const data = combatantData(app, actor);
+
+  for (const kind of kinds) {
+    const group = actions.filter(a => (a.kind || 'action') === kind.id);
+    if (!group.length) continue;
+
+    const spent = !canUseKind(usage, actor.id, kind.id);
+    const scope = scopeOf(kind.id);
+
+    wrap.appendChild(h('div', { style: { marginBottom: '7px' } },
+      h('div.tiny', { style: { color: spent ? 'var(--muted)' : 'var(--muted)', marginBottom: '4px' } },
+        kind.label,
+        h('span.tiny.muted', {}, `　${kind.hint}`),
+        spent ? h('span.badge', { style: { marginLeft: '6px', background: '#4a3a1f', color: '#ffd79a' } },
+          scope === 'round' ? '本轮已用' : '本回合已用') : null),
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px' } },
+        ...group.map((act) => {
+          // 伤害骰式里的 DB / STR 这类符号按当前行动者展开，免得界面上看到占位符
+          const dmg = act.damage ? expandDamageExpr(rs, data || {}, act.damage) : '';
+          return h('button.btn.sm.action-btn' + (spent ? '.ghost' : ''), {
+            'data-action': act.name,
+            'data-kind': act.kind || 'action',
+            'data-spent': spent ? '1' : '0',
+            disabled: spent,
+            title: `${describeAction(act) || '无判定'}${act.note ? `\n${act.note}` : ''}`
+              + (spent ? '\n（这一类行动经济已经用掉了）' : ''),
+            style: { textAlign: 'left', opacity: spent ? .45 : 1 },
+            onclick: () => resolveActorAction(app, actor, act, targetSel.dataset.picked, list),
+          }, act.name + (dmg ? ` ⟶ ${dmg}` : ''));
+        }),
+      ),
+    ));
+  }
+
+  if (kinds.every(k => scopeOf(k.id) === 'none' || !canUseKind(usage, actor.id, k.id))) {
+    wrap.appendChild(h('div.tiny', { style: { color: 'var(--warn)', marginTop: '2px' } },
+      '这一回合的行动经济已经用完，点「下一回合 →」把主动权交给下一位。'));
+  }
+
+  wrap.appendChild(h('div.row', { style: { marginTop: '9px' } },
+    h('button.btn.sm.ghost', {
+      title: '把当前行动者的行动经济清空（记错了可以重来）',
+      onclick: () => {
+        app.updateCombat((c) => {
+          c.used = { ...(c.used || {}) };
+          delete c.used[actor.id];
+        });
+        toast(`${actor.name} 的行动经济已重置`);
+      },
+    }, '重置行动经济'),
+  ));
+
+  return wrap;
+}
+
+/** 结算一个行动：掷判定 → 命中则掷伤害 → 记日志（必要时扣血） */
+function resolveActorAction(app, actor, action, targetId, list) {
+  const rs = app.ruleset();
+  const target = list.find(c => c.id === targetId) || null;
+  const data = combatantData(app, actor);
+
+  const rng = app.freshRng();
+  const a = normalizeActions([action])[0];
+
+  // 把目标的防御值接到判定上：DND 用 DC，其余系统用难度
+  const req = { ...a.check };
+  if (target && target.defense != null) {
+    if (rs.id === 'dnd5e') req.dc = target.defense;
+    else req.difficulty = target.defense;
+  }
+
+  let res;
+  try {
+    res = resolveAction(rs, data || {}, { ...a, check: req }, rng);
+  } catch (err) {
+    toast(`结算失败：${err.message}`, true);
+    return;
+  }
+
+  const targetText = target && a.target !== 'self' && a.target !== 'none' ? ` → ${target.name}` : '';
+  const kindLabel = kindsFor(rs.id).find(k => k.id === (a.kind || 'action'))?.label || a.kind;
+  const detail = [
+    target ? `目标：${target.name}（${target.defenseLabel} ${target.defense ?? '—'}）` : '',
+    `行动经济：${kindLabel}`,
+    a.note,
+    describeActionResult(res),
+    describeCost(a.cost) ? `消耗：${describeCost(a.cost)}` : '',
+  ].filter(Boolean).join('\n');
+
+  app.addEvent({
+    type: 'combat',
+    actor: actor.refId || null,
+    actorName: actor.kind === 'pc' ? actor.name : null,
+    title: `${actor.name} 使用【${a.name}】${targetText}`,
+    detail,
+    seed: res.seed,
+    data: { kind: 'action', action: a, result: res.check, damage: res.damage },
+  });
+
+  // 命中且掷出伤害就顺带扣血
+  if (target && res.damage?.ok && res.check?.success !== false) {
+    applyHp(app, target, -res.damage.total, '受到伤害');
+    toast(`${a.name} 命中 ${target.name}，伤害 ${res.damage.total}`);
+  } else if (res.check?.success === false) {
+    toast(`${a.name} 未命中`, true);
+  } else if (res.damage?.ok) {
+    toast(`${a.name}：伤害 ${res.damage.total}`);
+  }
+
+  // 记下这一类行动经济已经用掉，界面上随即置灰
+  app.updateCombat((c) => { c.used = markKindUsed(c.used, actor.id, a.kind || 'action'); });
 }
 
 /* ────────────────────────── 添加参战者 ────────────────────────── */
@@ -221,16 +397,60 @@ function setupCard(app, combat) {
   const hpInput = h('input.input.mono', { type: 'number', value: 10, style: { width: '84px' }, title: '生命上限' });
   const acInput = h('input.input.mono', { type: 'number', value: 12, style: { width: '84px' }, title: '防御值' });
 
+  /* NPC 的行动：从预设里挑，加进待添加列表 */
+  const presets = rs.actionPresets || [];
+  const pending = [];
+  const pendingBox = h('div.row.wrap', { style: { gap: '4px', marginTop: '5px' } });
+
+  const redrawPending = () => {
+    render(pendingBox, ...pending.map((p, i) => h('span.chip', {
+      style: { cursor: 'pointer' },
+      title: '点击移除',
+      onclick: () => { pending.splice(i, 1); redrawPending(); },
+    }, `${p.name} ✕`)));
+  };
+
+  const presetSel = h('select.select', {
+    style: { flex: '1', minWidth: '160px' },
+    onchange: (e) => {
+      const p = presets.find(x => x.name === e.target.value);
+      if (!p) return;
+      pending.push(p);
+      redrawPending();
+      e.target.value = '';
+    },
+  }, [
+    h('option', { value: '' }, `＋ 选择行动（${presets.length} 个预设）…`),
+    ...presets.map(p => h('option', { value: p.name }, `${p.name}${p.damage ? `（${p.damage}）` : ''}`)),
+  ]);
+
   const addNpc = () => {
     const name = nameInput.value.trim() || `无名者 ${combat.combatants.length + 1}`;
-    const cb = blankCombatant(name);
+    // 传规则集进去，NPC 才会带上可用于判定的精简数据
+    const cb = blankCombatant(name, rs);
     cb.maxHp = Number(hpInput.value) || 10;
     cb.hp = cb.maxHp;
     cb.defense = Number(acInput.value) || 12;
-    cb.defenseLabel = rs.id === 'daggerheart' ? '闪避' : 'AC';
+    cb.defenseLabel = rs.id === 'dnd5e' ? 'AC' : rs.id === 'coc7' ? '—' : '闪避';
+    cb.actions = pending.map(actionFromPreset);
+    if (cb.data) {
+      if (cb.data.combat) { cb.data.combat.hpMax = cb.maxHp; cb.data.combat.hp = cb.hp; }
+      if (cb.data.attributes) { /* COC 的属性走默认值，可在角色卡页细化 */ }
+      cb.data.actions = cb.actions;
+    }
+
     app.updateCombat((x) => { x.combatants.push(cb); });
-    app.addEvent({ type: 'combat', title: `加入战斗：${cb.name}`, detail: `生命 ${cb.hp}/${cb.maxHp} · ${cb.defenseLabel} ${cb.defense}` });
+    app.addEvent({
+      type: 'combat',
+      title: `加入战斗：${cb.name}`,
+      detail: [
+        `生命 ${cb.hp}/${cb.maxHp} · ${cb.defenseLabel} ${cb.defense}`,
+        cb.actions.length ? `行动：${cb.actions.map(a => a.name).join('、')}` : '未指定行动（战斗中无法结算）',
+      ].join('\n'),
+    });
     nameInput.value = '';
+    pending.length = 0;
+    redrawPending();
     nameInput.focus();
   };
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addNpc(); });
@@ -245,9 +465,14 @@ function setupCard(app, combat) {
           : h('div.tiny.muted', {}, '所有角色都已在战斗中'),
       ),
       h('div.target-group', {},
-        h('div.tg-title', {}, '手动添加'),
+        h('div.tg-title', {}, '手动添加 NPC'),
         h('div.row.wrap', {}, nameInput, hpInput, acInput,
           h('button.btn', { onclick: addNpc }, '＋ 添加')),
+        h('div.row.wrap', { style: { marginTop: '6px' } }, presetSel),
+        pendingBox,
+        h('div.tiny.muted', { style: { marginTop: '5px', lineHeight: 1.7 } },
+          '给 NPC 指定行动后，战斗中轮到它时才能结算；没指定行动就只能记生命与状态。'
+          + 'NPC 的判定数值取自规则集的默认值，需要精确数值可以之后在角色卡里细化。'),
       ),
     ),
   );
@@ -433,7 +658,13 @@ function stepTurn(app, dir) {
   if (turn < 0) { turn = n - 1; round = Math.max(1, round - 1); }
 
   const rolledRound = round !== combat.round;
-  app.updateCombat((c) => { c.round = round; c.turnIndex = turn; });
+  // 轮到谁谁拿回「每回合」的行动经济；进了新一轮则所有人都拿回反应
+  const incoming = sortedCombatants(combat)[turn];
+  app.updateCombat((c) => {
+    c.round = round;
+    c.turnIndex = turn;
+    c.used = refreshUsage(c.used || {}, incoming?.id ?? null, rolledRound);
+  });
 
   if (rolledRound && dir > 0) {
     app.addEvent({

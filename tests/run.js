@@ -11,6 +11,12 @@ import os from 'node:os';
 import { RNG, newSeed, xmur3, mulberry32 } from '../src/core/rng.js';
 import { rollExpr, parseExpression, rollPercentile, DiceError } from '../src/core/dice.js';
 import { pointBuyCost } from '../src/core/creation.js';
+import {
+  ACTION_KINDS, kindsFor, ACTION_TARGETS, blankAction, actionFromPreset,
+  normalizeAction, normalizeActions, describeCost, describeAction,
+  expandDamageExpr, resolveAction, describeActionResult,
+  ACTION_KIND_SCOPE, scopeOf, spentKinds, canUseKind, markKindUsed, refreshUsage,
+} from '../src/core/actions.js';
 import { getRuleset } from '../src/core/rulesets/index.js';
 import coc7 from '../src/core/rulesets/coc7.js';
 import dnd5e from '../src/core/rulesets/dnd5e.js';
@@ -1957,6 +1963,94 @@ test('视图里用到的 app.* 方法都在 app.js 的导出对象里', () => {
   assert.deepEqual(missing, [], `以下方法被视图调用但没在 app.js 中导出：\n  ${missing.join('\n  ')}`);
 });
 
+test('渲染层不会用到没 import 的核心函数', () => {
+  const root = path.join(import.meta.dirname, '..');
+  const coreDir = path.join(root, 'src', 'core');
+
+  // 收集核心层所有具名导出
+  const coreExports = new Set();
+  const walkCore = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walkCore(p); continue; }
+      if (!e.name.endsWith('.js')) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      for (const m of src.matchAll(/^export\s+(?:async\s+)?(?:function|const|let|class)\s+([A-Za-z_$][\w$]*)/gm)) {
+        coreExports.add(m[1]);
+      }
+    }
+  };
+  walkCore(coreDir);
+  assert.ok(coreExports.size > 30, `解析到的核心导出太少（${coreExports.size}）`);
+
+  const rendererDir = path.join(root, 'src', 'renderer');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.js')) files.push(p);
+    }
+  };
+  walk(rendererDir);
+
+  // 浏览器全局 + 模块内常见的局部名，避免误报
+  const GLOBALS = new Set([
+    'document', 'window', 'console', 'fetch', 'setTimeout', 'clearTimeout',
+    'setInterval', 'clearInterval', 'requestAnimationFrame', 'alert', 'confirm',
+    'prompt', 'Event', 'CustomEvent', 'URL', 'URLSearchParams', 'TextEncoder',
+    'TextDecoder', 'AbortController', 'structuredClone', 'queueMicrotask',
+    'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent',
+    'String', 'Number', 'Boolean', 'Array', 'Object', 'Math', 'JSON', 'Date',
+    'Map', 'Set', 'Promise', 'Error', 'RegExp', 'Symbol', 'BigInt', 'Function',
+  ]);
+
+  const problems = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    const rel = path.relative(rendererDir, f);
+
+    // 本文件 import 进来的名字
+    const imported = new Set();
+    for (const m of src.matchAll(/import\s+([\s\S]*?)\s+from\s+['"][^'"]+['"]/g)) {
+      const clause = m[1];
+      const braces = /\{([\s\S]*?)\}/.exec(clause);
+      if (braces) {
+        for (const part of braces[1].split(',')) {
+          const name = part.trim().split(/\s+as\s+/).pop().trim();
+          if (name) imported.add(name);
+        }
+      }
+      const def = clause.replace(/\{[\s\S]*?\}/, '').replace(/,/g, '').trim();
+      if (def && !def.startsWith('*')) imported.add(def.split(/\s+/)[0]);
+      const ns = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause);
+      if (ns) imported.add(ns[1]);
+    }
+
+    // 本文件自己声明的名字（顶层或嵌套都算）
+    const declared = new Set();
+    for (const m of src.matchAll(/\b(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
+      declared.add(m[1]);
+    }
+    // 解构出来的名字也算
+    for (const m of src.matchAll(/const\s*\{([^}]*)\}\s*=/g)) {
+      for (const part of m[1].split(',')) {
+        const name = part.trim().split(/[:\s]/).pop().replace(/=.*$/, '').trim();
+        if (name) declared.add(name);
+      }
+    }
+
+    for (const m of src.matchAll(/(^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+      const name = m[2];
+      if (!coreExports.has(name)) continue;
+      if (imported.has(name) || declared.has(name) || GLOBALS.has(name)) continue;
+      problems.push(`${rel} → ${name}()`);
+    }
+  }
+  assert.deepEqual([...new Set(problems)], [],
+    `以下核心函数被调用但没有 import（运行到那一行才会炸）：\n  ${[...new Set(problems)].join('\n  ')}`);
+});
+
 test('前端模块之间的相对导入路径都存在', () => {
   const rendererDir = path.join(import.meta.dirname, '..', 'src', 'renderer');
   const files = [];
@@ -2009,6 +2103,295 @@ test('所有 JSON 文件不带 BOM 且能解析', () => {
     catch (err) { problems.push(`${rel} 解析失败：${err.message}`); }
   }
   assert.deepEqual(problems, [], problems.join('\n'));
+});
+
+/* ══════════════════════════ 行动系统 ══════════════════════════ */
+
+group('行动系统');
+
+test('四套规则都提供行动预设，且字段合法', () => {
+  for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+    const rs = getRuleset(id);
+    const presets = rs.actionPresets;
+    assert.ok(Array.isArray(presets) && presets.length > 0, `${id} 没有行动预设`);
+    for (const p of presets) {
+      assert.ok(p.name, `${id} 有预设缺名字`);
+      assert.ok(['action', 'bonus', 'reaction', 'free'].includes(p.kind || 'action'),
+        `${id} 的「${p.name}」行动经济非法：${p.kind}`);
+    }
+  }
+});
+
+test('每套规则的行动经济分类都有定义', () => {
+  for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+    const kinds = kindsFor(id);
+    assert.ok(kinds.length > 0, `${id} 没有定义行动经济`);
+    for (const k of kinds) {
+      assert.ok(k.id && k.label, `${id} 的行动经济缺字段`);
+    }
+  }
+});
+
+test('DND 的行动经济包含主要 / 附赠 / 反应三类', () => {
+  const ids = kindsFor('dnd5e').map(k => k.id);
+  for (const want of ['action', 'bonus', 'reaction']) {
+    assert.ok(ids.includes(want), `DND 应包含 ${want}`);
+  }
+  const presets = dnd5e.actionPresets;
+  assert.ok(presets.some(p => p.kind === 'bonus'), '应有附赠动作预设');
+  assert.ok(presets.some(p => p.kind === 'reaction'), '应有反应预设');
+});
+
+test('blankAction 生成字段齐全的行动', () => {
+  const a = blankAction();
+  assert.ok(a.id);
+  assert.equal(a.kind, 'action');
+  assert.deepEqual(a.check, {});
+  assert.deepEqual(a.cost, {});
+  assert.equal(a.damage, '');
+});
+
+test('actionFromPreset 不会与预设共享引用', () => {
+  const preset = { name: '攻击', kind: 'action', check: { targetKey: 'x' }, cost: { hope: 1 } };
+  const a1 = actionFromPreset(preset);
+  const a2 = actionFromPreset(preset);
+  a1.check.targetKey = '改过了';
+  a1.cost.hope = 99;
+  assert.equal(a2.check.targetKey, 'x', 'check 应是深拷贝');
+  assert.equal(a2.cost.hope, 1, 'cost 应是深拷贝');
+  assert.notEqual(a1.id, a2.id);
+});
+
+test('normalizeAction 对残缺数据补齐而不崩', () => {
+  for (const bad of [null, undefined, {}, { name: 'x' }, { check: null, cost: 'nope' }]) {
+    const a = normalizeAction(bad);
+    assert.ok(a.id && a.name && a.kind);
+    assert.equal(typeof a.check, 'object');
+    assert.equal(typeof a.cost, 'object');
+  }
+});
+
+test('resolveAction 复用规则集判定，并给出伤害', () => {
+  const data = coc7.createDefault('测试');
+  data.skills['格斗（斗殴）'] = 60;
+  const action = actionFromPreset(
+    coc7.actionPresets.find(p => p.name === '格斗攻击'),
+  );
+  // 个位 5、十位 1 → 15，对 60 是困难成功
+  const res = resolveAction(coc7, data, action, new FakeRng([5, 1, 2]));
+  assert.equal(res.check.roll, 15);
+  assert.equal(res.check.success, true);
+  assert.ok(res.damage?.ok, '判定成功应掷伤害');
+  assert.ok(res.damage.expr, '伤害应记录骰式');
+  assert.equal(typeof res.damageTotal, 'number');
+  assert.equal(res.action.name, action.name);
+});
+
+test('判定失败时不掷伤害', () => {
+  const data = coc7.createDefault('测试');
+  data.skills['格斗（斗殴）'] = 30;
+  const action = actionFromPreset(coc7.actionPresets.find(p => p.name === '格斗攻击'));
+  // 个位 0、十位 9 → 90，对 30 是失败
+  const res = resolveAction(coc7, data, action, new FakeRng([0, 9]));
+  assert.equal(res.check.success, false);
+  assert.equal(res.damage, null, '失败不该掷伤害');
+});
+
+test('未设难度时 success 为 null，仍会掷伤害', () => {
+  const data = daggerheart.createDefault('测试');
+  data.traits.strength = 2;
+  const action = actionFromPreset(daggerheart.actionPresets.find(p => p.name === '攻击判定'));
+  const res = resolveAction(daggerheart, data, action, new RNG(newSeed()));
+  assert.equal(res.check.success, null, '匕首心默认不设难度');
+  assert.ok(res.damage?.ok, '无难度时应照常掷伤害');
+});
+
+test('反应类行动在匕首心里标记为 reaction（不产生希望/恐惧）', () => {
+  const data = daggerheart.createDefault('测试');
+  const action = actionFromPreset(daggerheart.actionPresets.find(p => p.name === '反应判定'));
+  const res = resolveAction(daggerheart, data, action, new RNG(newSeed()));
+  assert.equal(res.check.rollType, 'reaction');
+  assert.equal(res.check.token, null, '反应判定不产生希望或恐惧');
+});
+
+test('非法伤害骰式不会让结算崩，而是记下错误', () => {
+  const data = coc7.createDefault('测试');
+  data.skills['格斗（斗殴）'] = 90;
+  const action = actionFromPreset({ name: '测试', check: { targetKey: 'skill:格斗（斗殴）' }, damage: '不是骰式' });
+  const res = resolveAction(coc7, data, action, new FakeRng([5, 1]));
+  assert.equal(res.damage.ok, false);
+  assert.match(res.damage.error, /伤害骰式无效/);
+  assert.equal(res.damageTotal, null);
+});
+
+test('describeCost 只列出大于 0 的消耗', () => {
+  assert.equal(describeCost({ hope: 2, stress: 0 }), '希望 −2');
+  assert.equal(describeCost({ hope: 1, stress: 1 }), '希望 −1，压力 −1');
+  assert.equal(describeCost({}), '');
+  assert.equal(describeCost(null), '');
+});
+
+test('describeActionResult 拼出可读的一行', () => {
+  const data = coc7.createDefault('测试');
+  data.skills['格斗（斗殴）'] = 90;
+  const action = actionFromPreset({ name: '测试', check: { targetKey: 'skill:格斗（斗殴）' }, damage: '1d4' });
+  const res = resolveAction(coc7, data, action, new FakeRng([5, 1, 3]));
+  const line = describeActionResult(res);
+  assert.match(line, /1d100 = 15/);
+  assert.match(line, /伤害 1d4 = 3/);
+});
+
+test('华渚的行动预设在匕首心基础上扩展', () => {
+  const base = daggerheart.actionPresets.map(p => p.name);
+  const hz = HZ.actionPresets.map(p => p.name);
+  for (const n of base) assert.ok(hz.includes(n), `华渚应包含匕首心的「${n}」`);
+  assert.ok(hz.length > base.length, '华渚应有额外的行动');
+  assert.ok(hz.some(n => n.includes('炁')), '应有华渚特有的炁相关行动');
+});
+
+test('行动判定结果可复现', () => {
+  const data = coc7.createDefault('测试');
+  data.skills['格斗（斗殴）'] = 60;
+  const action = actionFromPreset(coc7.actionPresets.find(p => p.name === '格斗攻击'));
+  const seed = newSeed();
+  const a = resolveAction(coc7, data, action, new RNG(seed));
+  const b = resolveAction(coc7, data, action, new RNG(seed));
+  assert.equal(a.check.roll, b.check.roll);
+  assert.equal(a.damageTotal, b.damageTotal);
+  assert.equal(a.seed, b.seed);
+});
+
+test('expandDamageExpr 把 DB 换成实际伤害加值', () => {
+  const mk = (str, siz) => ({ attributes: { str, siz } });
+  // STR+SIZ = 100 → DB 为 0
+  assert.equal(expandDamageExpr(coc7, mk(50, 50), '1d3+DB'), '1d3+0');
+  // STR+SIZ = 150 → DB 为 +1D4，多出来的 + 应被合并
+  assert.equal(expandDamageExpr(coc7, mk(75, 75), '1d3+DB'), '1d3+1D4');
+  // STR+SIZ = 60 → DB 为 -2
+  assert.equal(expandDamageExpr(coc7, mk(30, 30), '1d3+DB'), '1d3-2');
+  // 破折号：STR+SIZ = 200 → DB 为 +1D6
+  assert.equal(expandDamageExpr(coc7, mk(100, 100), '1d3+DB'), '1d3+1D6');
+});
+
+test('expandDamageExpr 对没有符号声明的规则集原样返回', () => {
+  assert.equal(expandDamageExpr(daggerheart, {}, '2d8'), '2d8');
+  assert.equal(expandDamageExpr(daggerheart, {}, ''), '');
+});
+
+test('expandDamageExpr 把 DND 的力量调整值展开', () => {
+  assert.equal(expandDamageExpr(dnd5e, { abilities: { str: 16, dex: 10 } }, '1d8+STR'), '1d8+3');
+  assert.equal(expandDamageExpr(dnd5e, { abilities: { str: 8, dex: 10 } }, '1d8+STR'), '1d8-1');
+  assert.equal(expandDamageExpr(dnd5e, { abilities: { str: 10, dex: 18 } }, '1d6+DEX'), '1d6+4');
+});
+
+test('克苏鲁的格斗攻击能掷出真实伤害（DB 已被代入）', () => {
+  const data = coc7.createDefault('测试');
+  data.attributes.str = 75;
+  data.attributes.siz = 75;
+  data.skills['格斗（斗殴）'] = 90;
+  const action = actionFromPreset(coc7.actionPresets.find(p => p.name === '格斗攻击'));
+  const res = resolveAction(coc7, data, action, new FakeRng([5, 1, 2, 3]));
+  assert.ok(res.damage?.ok, `应能结算伤害：${JSON.stringify(res.damage)}`);
+  assert.equal(res.damage.expr, '1d3+1D4');
+  assert.equal(res.damageTotal, 2 + 3);
+});
+
+test('DND 的攻击预设用角色的力量调整值而非写死的 +3', () => {
+  const data = dnd5e.createDefault('测试');
+  data.abilities.str = 8; // 调整值 -1
+  data.proficiency.skills = [];
+  const action = actionFromPreset(dnd5e.actionPresets.find(p => p.name === '攻击'));
+  const res = resolveAction(dnd5e, data, action, new RNG(newSeed()));
+  assert.ok(res.damage?.ok);
+  assert.match(res.damage.expr, /^1d8(\+0|-1)$/, `伤害骰式应代入调整值：${res.damage.expr}`);
+});
+
+test('DND 的攻击在力量 10 时不出现 ++ 这类坏骰式', () => {
+  const data = dnd5e.createDefault('测试');
+  data.abilities.str = 10;
+  const action = actionFromPreset(dnd5e.actionPresets.find(p => p.name === '攻击'));
+  const res = resolveAction(dnd5e, data, action, new RNG(newSeed()));
+  assert.ok(res.damage?.ok, JSON.stringify(res.damage));
+  assert.ok(!res.damage.expr.includes('++'), res.damage.expr);
+});
+
+/* ══════════════════════════ 行动经济 ══════════════════════════ */
+
+group('行动经济');
+
+test('每一类行动都有自己的重置周期', () => {
+  assert.equal(scopeOf('action'), 'turn');
+  assert.equal(scopeOf('bonus'), 'turn');
+  assert.equal(scopeOf('reaction'), 'round');
+  assert.equal(scopeOf('free'), 'none');
+  assert.equal(scopeOf('没见过的类别'), 'turn');
+  for (const id of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+    for (const k of kindsFor(id)) {
+      assert.ok(ACTION_KIND_SCOPE[k.id], `${id} 的「${k.id}」没有定义重置周期`);
+    }
+  }
+});
+
+test('没用过的时候什么都能做', () => {
+  assert.equal(canUseKind({}, 'a', 'action'), true);
+  assert.equal(canUseKind(undefined, 'a', 'reaction'), true);
+  assert.deepEqual(spentKinds(undefined, 'a'), {});
+});
+
+test('用过之后同类行动被占掉，其他类不受影响', () => {
+  let used = markKindUsed({}, 'a', 'action');
+  assert.equal(canUseKind(used, 'a', 'action'), false);
+  assert.equal(canUseKind(used, 'a', 'bonus'), true);
+  assert.equal(canUseKind(used, 'a', 'reaction'), true);
+  // 别人不受影响
+  assert.equal(canUseKind(used, 'b', 'action'), true);
+});
+
+test('自由行动永远不会被占掉', () => {
+  const used = markKindUsed({}, 'a', 'free');
+  assert.equal(canUseKind(used, 'a', 'free'), true);
+  assert.deepEqual(used, {});
+});
+
+test('markKindUsed 不修改传入的对象', () => {
+  const first = markKindUsed({}, 'a', 'action');
+  const second = markKindUsed(first, 'a', 'bonus');
+  assert.deepEqual(first, { a: { action: true } });
+  assert.deepEqual(second, { a: { action: true, bonus: true } });
+});
+
+test('轮到某人时他拿回每回合的行动，别人不拿', () => {
+  const used = { a: { action: true, bonus: true }, b: { action: true } };
+  refreshUsage(used, 'a', false);
+  assert.equal(canUseKind(used, 'a', 'action'), true);
+  assert.equal(canUseKind(used, 'a', 'bonus'), true);
+  assert.equal(canUseKind(used, 'b', 'action'), false, '没轮到的角色不该刷新');
+});
+
+test('进入新一轮时所有人的反应都拿回来', () => {
+  const used = { a: { action: true, reaction: true }, b: { reaction: true } };
+  refreshUsage(used, 'a', true);
+  assert.equal(canUseKind(used, 'a', 'reaction'), true);
+  assert.equal(canUseKind(used, 'b', 'reaction'), true, '新一轮所有人都拿回反应');
+});
+
+test('同一轮内换人不会拿回反应', () => {
+  const used = markKindUsed({}, 'a', 'reaction');
+  refreshUsage(used, 'b', false);
+  assert.equal(canUseKind(used, 'a', 'reaction'), false, '反应按轮算，换人不刷新');
+});
+
+test('DND 主要动作每回合一次，反应每轮一次', () => {
+  let used = {};
+  used = markKindUsed(used, 'pc', 'action');
+  used = markKindUsed(used, 'pc', 'reaction');
+  assert.equal(canUseKind(used, 'pc', 'action'), false);
+  assert.equal(canUseKind(used, 'pc', 'reaction'), false);
+  // 同一轮里换到别人再换回来，反应仍然是空的
+  refreshUsage(used, 'npc', false);
+  refreshUsage(used, 'pc', false);
+  assert.equal(canUseKind(used, 'pc', 'action'), true, '新回合主要动作恢复');
+  assert.equal(canUseKind(used, 'pc', 'reaction'), false, '同一轮反应不恢复');
 });
 
 /* ══════════════════════════ 数据目录配置 ══════════════════════════ */

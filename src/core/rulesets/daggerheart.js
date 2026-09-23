@@ -150,6 +150,8 @@ function createDefault(name = '新英雄') {
       { name: '', mod: 2 }, { name: '', mod: 2 },
       { name: '', mod: 2 }, { name: '', mod: 2 },
     ],
+    /** 战斗中可执行的行动 */
+    actions: [],
     weapons: [],
     domainCards: [],
     inventory: '',
@@ -467,6 +469,18 @@ function creationValidate(data) {
   return v.result;
 }
 
+/** 行动预设。战斗轮到这个角色时，只能从已声明的行动里挑一个来结算。 */
+export const DH_ACTION_PRESETS = [
+  { name: '攻击判定', kind: 'action', target: 'enemy', check: { targetKey: 'trait:strength' }, damage: '1d8', note: '对抗目标闪避' },
+  { name: '施法判定', kind: 'action', target: 'enemy', check: { targetKey: 'spellcast' } },
+  { name: '行动判定', kind: 'action', target: 'none', check: { targetKey: 'trait:agility' } },
+  { name: '反应判定', kind: 'reaction', target: 'self', check: { targetKey: 'trait:instinct' }, note: '不产生希望与恐惧' },
+  { name: '协助盟友', kind: 'action', target: 'ally', cost: { hope: 1 }, note: '花费 1 希望，为盟友的判定加一个 d6' },
+  { name: '全力一击', kind: 'action', target: 'enemy', cost: { stress: 1 }, damage: '2d8', note: '标记 1 压力换取额外伤害' },
+  { name: '重整旗鼓', kind: 'action', target: 'self', cost: { hope: 1 }, note: '花费 1 希望清除 1 点压力' },
+  { name: '鼓起勇气', kind: 'action', target: 'ally', cost: { hope: 1 }, note: '给盟友 1 点希望' },
+];
+
 export const DH_CREATION = {
   summary: '起始六项属性从固定数组（+2 / +1 / +1 / 0 / 0 / −1）里各取一次分配；'
     + '职业决定起始闪避、生命点与两个领域，1 级带 2 条经历与 2 张领域卡，'
@@ -511,6 +525,7 @@ export default {
   damageSeverity,
   initiative,
   creation: DH_CREATION,
+  actionPresets: DH_ACTION_PRESETS,
   /* 车卡数据（来自 DHSheet 的 SRD 中文卡表） */
   ancestries: DH_ANCESTRIES,
   communities: DH_COMMUNITIES,

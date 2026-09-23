@@ -107,6 +107,8 @@ function createDefault(name = '新调查员') {
     ),
     /** 车卡时标记为本职技能的技能名；只有这些能吃「职业点数」 */
     occupationSkills: [],
+    /** 战斗中可执行的行动；轮到这个角色时只能从这组里挑 */
+    actions: [],
     weapons: [],
     gear: '',
     background: {
@@ -476,6 +478,31 @@ function creationValidate(data) {
   return v.result;
 }
 
+/**
+ * 行动预设。战斗中轮到这个角色时，只能从已声明的行动里挑一个来结算。
+ * check 字段会被直接交给 roll()，所以这里的写法与判定面板完全一致。
+ */
+export const COC_ACTION_PRESETS = [
+  { name: '格斗攻击', kind: 'action', target: 'enemy', check: { targetKey: 'skill:格斗（斗殴）', difficulty: 'regular' }, damage: '1d3+DB', note: '近身肉搏，伤害加值取自 STR+SIZ' },
+  { name: '手枪射击', kind: 'action', target: 'enemy', check: { targetKey: 'skill:射击（手枪）' }, damage: '1d10', note: '射程内单发射击' },
+  { name: '闪避', kind: 'reaction', target: 'self', check: { targetKey: 'skill:闪避' }, note: '被攻击时与之对抗' },
+  { name: '逃跑', kind: 'action', target: 'self', check: { targetKey: 'skill:闪避' }, note: '脱离战斗' },
+  { name: '瞄准', kind: 'action', target: 'enemy', note: '花一整轮瞄准，下次射击获得奖励骰' },
+  { name: '侦察', kind: 'action', target: 'none', check: { targetKey: 'skill:侦察' } },
+  { name: '急救', kind: 'action', target: 'ally', check: { targetKey: 'skill:急救' }, note: '为同伴止血' },
+  { name: '理智检定', kind: 'reaction', target: 'self', check: { targetKey: 'san' }, note: '目击可怖之物时' },
+];
+
+/**
+ * 伤害骰式里的符号取值。预设写 `1d3+DB`，这里给出该角色当前的伤害加值。
+ * 正数带 `+` 号也没关系：展开时会和模板里的运算符合并。
+ */
+export function damageVars(data) {
+  const a = data?.attributes || {};
+  const { db } = buildAndDB((a.str ?? 50) + (a.siz ?? 50));
+  return { DB: db };
+}
+
 export const COC_CREATION = {
   summary: '属性按规则书公式掷骰（3d6×5 与 (2d6+6)×5），再按年龄做下降修正；'
     + '技能点分为「本职」与「兴趣」两笔，额度分别由教育与智力决定。',
@@ -525,6 +552,8 @@ export default {
   rollOpposed,
   initiative,
   creation: COC_CREATION,
+  actionPresets: COC_ACTION_PRESETS,
+  damageVars,
   buildAndDB,
   movement,
   ageModifier,

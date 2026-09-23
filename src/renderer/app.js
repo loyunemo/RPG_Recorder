@@ -29,6 +29,8 @@ export const emptyCombat = () => ({
   round: 1,
   turnIndex: 0,
   combatants: [],
+  /** 行动经济的使用情况：{ 参战者id: { action: true, bonus: true, reaction: true } } */
+  used: {},
 });
 
 export const state = {

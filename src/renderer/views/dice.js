@@ -2,6 +2,8 @@
 
 import { h, render, toast, fmtTime } from '../util.js';
 import { platform } from '../platform.js';
+import { sortedCombatants } from './combat.js';
+import { combatantActions, combatantData } from '../characterOps.js';
 
 /** 面板自身的临时状态，切 Tab 不丢失 */
 const local = {
@@ -33,6 +35,14 @@ export function renderDiceView(root, app) {
 
   const container = h('div');
   render(root, container);
+
+  // 战斗进行中：结算只能走当前行动者声明的行动，不再提供自由选目标
+  const combat = state.combat;
+  if (combat?.active && combat.combatants?.length) {
+    container.appendChild(combatLockNotice(app, combat));
+    container.appendChild(freeRollCard(app));
+    return;
+  }
 
   if (!char) {
     container.appendChild(h('div.empty', {},
@@ -74,6 +84,64 @@ export function renderDiceView(root, app) {
   if (rs.supportsOpposed) container.appendChild(opposedCard(app, rs, char));
   container.appendChild(resultCard(app));
   container.appendChild(freeRollCard(app));
+}
+
+/* ── 战斗中的判定锁定 ── */
+
+/**
+ * 战斗进行中，判定入口收敛到「当前行动者的行动」。
+ *
+ * 这是刻意的约束：战斗中不该随手挑一个技能就掷 ——
+ * 该角色的行为模式早在角色卡/NPC 上声明好了，结算只能从那里来。
+ */
+function combatLockNotice(app, combat) {
+  const rs = app.ruleset();
+  const list = sortedCombatants(combat);
+  const actor = list[combat.turnIndex];
+  const actions = actor ? combatantActions(app, actor) : [];
+
+  const box = h('div.card', {
+    style: { borderColor: 'var(--accent-dim)', background: '#1b2230' },
+  },
+    h('h3', {}, '战斗进行中',
+      h('div.spacer'),
+      h('span.badge', {}, `第 ${combat.round} 回合`)),
+    h('div', { style: { fontSize: '16px', fontWeight: 700, marginBottom: '3px' } },
+      actor ? actor.name : '—'),
+    h('div.tiny.muted', { style: { marginBottom: '10px' } },
+      '当前行动者。战斗中的判定只能通过它声明的行动来结算。'),
+  );
+
+  if (!actor) {
+    box.appendChild(h('div.tiny.muted', {}, '战斗里还没有参战者。'));
+    return box;
+  }
+
+  if (!actions.length) {
+    box.appendChild(h('div.tiny', { style: { color: 'var(--warn)', lineHeight: 1.8 } },
+      '这名参战者还没有声明任何行动，因此战斗中无法结算。',
+      h('br'),
+      actor.kind === 'pc'
+        ? '到它的角色卡 →「行动」里添加。'
+        : '把它移出战斗后重新添加，添加时可以选择行动。'));
+  } else {
+    const kinds = [];
+    for (const a of actions) if (!kinds.includes(a.kind || 'action')) kinds.push(a.kind || 'action');
+    box.appendChild(h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px' } },
+      ...actions.map(a => h('span.chip', { style: { cursor: 'default' } },
+        a.name, a.damage ? h('span.tiny.muted', {}, ` ${a.damage}`) : null))));
+  }
+
+  box.appendChild(h('div.row', { style: { marginTop: '12px' } },
+    h('button.btn.primary.sm', {
+      onclick: () => { app.state.tab = 'combat'; app.renderMain(); },
+    }, '到战斗页结算 →'),
+  ));
+
+  box.appendChild(h('div.tiny.muted', { style: { marginTop: '9px', lineHeight: 1.8 } },
+    '下面的「自由骰式」不受限制，用于伤害、暗骰等临时投掷。'));
+
+  return box;
 }
 
 /* ── 对抗检定（COC） ── */
