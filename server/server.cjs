@@ -17,9 +17,17 @@ const { createTableServer } = require('./http.cjs');
 
 const APP_ROOT = path.join(__dirname, '..');
 const PORT = Number(process.env.RW_PORT || 41777);
-const DATA_DIR = process.env.RW_DATA_DIR
-  ? path.resolve(process.env.RW_DATA_DIR)
-  : path.join(APP_ROOT, 'data');
+
+/** 与桌面端保持一致的优先级：命令行参数 > 环境变量 > 默认位置 */
+function resolveDataDir() {
+  const arg = process.argv.find(a => a.startsWith('--data-dir='));
+  if (arg) return { dir: path.resolve(arg.slice('--data-dir='.length)), source: 'cli' };
+  if (process.env.RW_DATA_DIR) return { dir: path.resolve(process.env.RW_DATA_DIR), source: 'env' };
+  return { dir: path.join(APP_ROOT, 'data'), source: 'default' };
+}
+
+const dataDirMeta = resolveDataDir();
+const DATA_DIR = dataDirMeta.dir;
 
 const store = new Store(DATA_DIR);
 const table = new Table(store);
@@ -41,15 +49,20 @@ const routes = createRoutes({
 });
 
 const hub = new Hub({ store, routes, table });
-const server = createTableServer({ store, hub, table, appRoot: APP_ROOT, port: PORT });
+const server = createTableServer({
+  store, hub, table, appRoot: APP_ROOT, port: PORT,
+  dataDirMeta: { source: dataDirMeta.source, defaultDir: path.join(APP_ROOT, 'data') },
+});
 
 // 绑定 0.0.0.0 以便局域网玩家接入；牌桌未开启时由 http.cjs 拒绝非本机请求
 server.listen(PORT, '0.0.0.0', () => {
   const local = `http://127.0.0.1:${PORT}/`;
-  console.log('[random-walking] 数据目录：', store.root);
+  const SRC = { cli: '命令行参数', env: '环境变量 RW_DATA_DIR', default: '默认位置' };
+  console.log('[random-walking] 数据目录：', store.root, `（${SRC[dataDirMeta.source]}）`);
   console.log('[random-walking] 本机地址：', local);
   console.log('[random-walking] 局域网地址：', `http://${lanAddress()}:${PORT}/`);
   console.log('[random-walking] 牌桌尚未开启，仅本机可访问。在界面里点「开启牌桌」后玩家才能接入。');
+  console.log('[random-walking] 换数据目录：npm run serve -- --data-dir=<路径>');
   if (!process.argv.includes('--no-open')) {
     spawn('cmd', ['/c', 'start', '', local], { stdio: 'ignore', detached: true }).unref();
   }

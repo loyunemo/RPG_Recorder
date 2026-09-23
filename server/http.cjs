@@ -75,7 +75,7 @@ function summariseCharacter(c) {
  * @param {string} deps.appRoot
  * @param {number} [deps.port]
  */
-function createTableServer({ store, hub, table, appRoot, port = 41777 }) {
+function createTableServer({ store, hub, table, appRoot, port = 41777, dataDirMeta = {} }) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
@@ -97,8 +97,11 @@ function createTableServer({ store, hub, table, appRoot, port = 41777 }) {
       if (url.pathname === '/api/info') {
         return sendJSON(res, 200, {
           mode: 'browser',
-          version: '0.2.0',
+          version: '0.5.1',
           dataDir: store.root,
+          // 浏览器模式改不了数据目录，把「怎么改」和当前来源告诉界面
+          dataDirSource: dataDirMeta.source || 'default',
+          defaultDir: dataDirMeta.defaultDir || '',
           platform: process.platform,
           node: process.versions.node,
           tableOpen: table.isOpen,

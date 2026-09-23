@@ -10,26 +10,47 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { Store } = require('./store.cjs');
 const { createRoutes } = require('./routes.cjs');
+const { readConfig, writeConfig, rememberDir, forgetDir, normalizedRecent, probeDir, copyTree } = require('./config.cjs');
 const { Table, lanAddress } = require('../server/table.cjs');
 const { Hub } = require('../server/hub.cjs');
 const { createTableServer } = require('../server/http.cjs');
 
 const APP_ROOT = path.join(__dirname, '..');
 
-/** 决定数据目录：显式环境变量 > 开发期放项目内 > 打包后放用户数据目录 */
+/** 配置放在 userData 下 —— 它记录的是「数据放哪」，不能放进数据目录本身 */
+const configFile = () => path.join(app.getPath('userData'), 'config.json');
+
+/** 没指定过目录时的默认位置 */
+function defaultDataDir() {
+  return app.isPackaged ? path.join(app.getPath('userData'), 'data') : path.join(APP_ROOT, 'data');
+}
+
+/**
+ * 决定数据目录。优先级：
+ *   1. `--data-dir=<路径>` 命令行参数（便携版、快捷方式、脚本用）
+ *   2. `RW_DATA_DIR` 环境变量
+ *   3. 配置文件里用户指定过的目录
+ *   4. 默认位置
+ * @returns {{dir:string, source:'cli'|'env'|'config'|'default'}}
+ */
 function resolveDataDir() {
-  if (process.env.RW_DATA_DIR) return path.resolve(process.env.RW_DATA_DIR);
-  if (!app.isPackaged) return path.join(APP_ROOT, 'data');
-  return path.join(app.getPath('userData'), 'data');
+  const arg = process.argv.find(a => a.startsWith('--data-dir='));
+  if (arg) return { dir: path.resolve(arg.slice('--data-dir='.length)), source: 'cli' };
+  if (process.env.RW_DATA_DIR) return { dir: path.resolve(process.env.RW_DATA_DIR), source: 'env' };
+  const cfg = readConfig(configFile());
+  if (cfg.dataDir) return { dir: path.resolve(cfg.dataDir), source: 'config' };
+  return { dir: defaultDataDir(), source: 'default' };
 }
 
 let store;
+let routes;             // 操作路由（切换数据目录时会重建）
 let mainWindow;
 let table;              // 牌桌（多人）
 let hub;                // 调用与广播的唯一入口
 let gmParticipant;      // 本机 GM 在牌桌上的身份
 let tableServer;        // 开桌后才启动的 HTTP + SSE 服务
 let tablePort = Number(process.env.RW_PORT || 41777);
+let dataDirInfo = { dir: '', source: 'default' };
 
 /**
  * 开发辅助：`--url=<地址>` 会让窗口加载远程地址且**不挂载 preload**，
@@ -577,12 +598,12 @@ function buildMenu() {
 }
 
 app.whenReady().then(() => {
-  const dataDir = resolveDataDir();
-  store = new Store(dataDir);
+  dataDirInfo = resolveDataDir();
+  store = new Store(dataDirInfo.dir);
   table = new Table(store);
-  console.log('[random-walking] 数据目录：', store.root);
+  console.log('[random-walking] 数据目录：', store.root, `（来源：${dataDirInfo.source}）`);
 
-  const routes = createRoutes({
+  routes = createRoutes({
     store,
     openPath: (p) => shell.openPath(p),
     saveFile: saveFileWithDialog,
@@ -600,6 +621,101 @@ app.whenReady().then(() => {
     },
   });
 
+  /** 用新的数据目录重建 Store / 路由 / Hub，然后刷新界面 */
+  function swapDataDir(newDir) {
+    if (newDir === store.root) return;
+    if (table.isOpen) table.close();          // 换目录等于换战役，牌桌必须先关
+    gmParticipant = null;
+
+    store = new Store(newDir);
+    routes = createRoutes({
+      store,
+      openPath: (p) => shell.openPath(p),
+      saveFile: saveFileWithDialog,
+    });
+    hub = new Hub({
+      store,
+      routes,
+      table: new Table(store),               // 牌桌也换成新的 Store
+      onLocal: (msg) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rw:sync', msg);
+      },
+    });
+    table = hub.table;
+    dataDirInfo = { dir: newDir, source: 'config' };
+    console.log('[random-walking] 数据目录已切换：', newDir);
+
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
+  }
+
+  ipcMain.handle('rw:dataDir', (_evt, action, payload = {}) => {
+    switch (action) {
+      case 'info': {
+        const probe = probeDir(store.root);
+        return {
+          current: store.root,
+          source: dataDirInfo.source,
+          defaultDir: defaultDataDir(),
+          configFile: configFile(),
+          // 归一化后再给界面，免得当前目录重复出现在「最近使用」里
+          recent: normalizedRecent(configFile()),
+          writable: probe.ok,
+          reason: probe.reason || '',
+          lockedBy: dataDirInfo.source === 'cli' ? '命令行参数 --data-dir'
+            : dataDirInfo.source === 'env' ? '环境变量 RW_DATA_DIR' : '',
+        };
+      }
+
+      case 'pick': {
+        return dialog.showOpenDialog(mainWindow, {
+          title: '选择数据目录',
+          message: '选择一个文件夹来存放战役数据（可以直接新建）',
+          properties: ['openDirectory', 'createDirectory'],
+          buttonLabel: '用这个目录',
+        }).then(r => (r.canceled || !r.filePaths.length ? null : r.filePaths[0]));
+      }
+
+      case 'check': {
+        const probe = probeDir(payload.dir || '');
+        return probe;
+      }
+
+      case 'set': {
+        const probe = probeDir(payload.dir || '');
+        if (!probe.ok) throw new Error(probe.reason);
+
+        // 需要搬迁时先复制，复制成功再切 —— 复制失败就什么都不动
+        let copied = 0;
+        if (payload.migrate && probe.dir !== store.root) {
+          copied = copyTree(store.root, probe.dir);
+        }
+
+        writeConfig(configFile(), { dataDir: probe.dir });
+        rememberDir(configFile(), probe.dir);
+        swapDataDir(probe.dir);
+        return { ok: true, dir: probe.dir, copied, hadData: probe.hasData };
+      }
+
+      case 'reset': {
+        // 回到默认位置
+        writeConfig(configFile(), { dataDir: '' });
+        swapDataDir(defaultDataDir());
+        return { ok: true, dir: defaultDataDir() };
+      }
+
+      case 'forget': {
+        const cfg = forgetDir(configFile(), payload.dir || '');
+        return { ok: true, recent: cfg.recentDirs };
+      }
+
+      case 'reveal':
+        return shell.openPath(store.root).then(() => true);
+
+      default:
+        throw new Error(`未知的数据目录操作：${action}`);
+    }
+  });
+
   // 本机界面 = 主持人；牌桌没开时 participant 为 null，即单机模式
   ipcMain.handle('rw:call', async (_evt, op, args = {}) => {
     const participant = table.isOpen ? gmParticipant : null;
@@ -611,6 +727,7 @@ app.whenReady().then(() => {
     mode: 'electron',
     version: app.getVersion(),
     dataDir: store.root,
+    dataDirSource: dataDirInfo.source,
     platform: process.platform,
     electron: process.versions.electron,
   }));

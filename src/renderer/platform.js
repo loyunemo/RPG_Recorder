@@ -37,6 +37,7 @@ async function detectBridge() {
       tableOpen: false,
       call: (op, args) => globalThis.rwBridge.call(op, args),
       table: (action, payload) => globalThis.rwBridge.table(action, payload),
+      dataDir: (action, payload) => globalThis.rwBridge.dataDir(action, payload),
       join: null,
       connectStream: null,
     };
@@ -50,6 +51,7 @@ async function detectBridge() {
     tableOpen: !!info.tableOpen,
     call: browserCall,
     table: browserTable,
+    dataDir: browserDataDir,
     join: browserJoin,
     connectStream: connectBrowserStream,
   };
@@ -110,8 +112,31 @@ async function browserTable(action, payload = {}) {
   }
 }
 
-async function browserJoin({ name, characterIds = [] }) {
-  const data = await api('/api/join', {
+/**
+ * 浏览器模式下的数据目录操作。
+ *
+ * 数据目录由服务端进程决定（`--data-dir` 参数或 `RW_DATA_DIR` 环境变量），
+ * 浏览器改不了 —— 这里只做只读展示，把改法告诉用户。
+ */
+async function browserDataDir(action) {
+  const info = await (await fetch('/api/info')).json();
+  if (action === 'info') {
+    return {
+      current: info.dataDir,
+      source: info.dataDirSource || 'default',
+      defaultDir: info.defaultDir || '',
+      recent: [],
+      writable: true,
+      canChange: false,
+      hint: '浏览器模式下数据目录由启动服务时决定，请用 '
+        + '`npm run serve -- --data-dir=<路径>` 或设置环境变量 RW_DATA_DIR。',
+    };
+  }
+  if (action === 'reveal') return api('/api/call', { method: 'POST', body: { op: 'openDataDir', args: {} } });
+  throw new Error('浏览器模式下无法更改数据目录');
+}
+
+async function browserJoin({ name, characterIds = [] }) {  const data = await api('/api/join', {
     method: 'POST',
     body: { playerId: getPlayerId() || undefined, name, characterIds },
   });
@@ -168,6 +193,12 @@ export async function tableAction(action, payload = {}) {
   return bridge.table(action, payload);
 }
 
+/** 数据目录操作：info / pick / check / set / reset / forget / reveal */
+export async function dataDirAction(action, payload = {}) {
+  if (!bridge.dataDir) return { current: platform.info.dataDir, canChange: false };
+  return bridge.dataDir(action, payload);
+}
+
 /** 玩家加入牌桌（桌面端无需，本机即主持人） */
 export async function joinTable(payload) {
   if (!bridge.join) throw new Error('桌面端无需加入，本机即主持人');
@@ -191,4 +222,7 @@ export async function exportMarkdown(cid, opts = {}) {
   return call('saveExport', { filename, content });
 }
 
-export default { call, platform, subscribe, tableAction, joinTable, connectStream, openDataDir, exportMarkdown };
+export default {
+  call, platform, subscribe, tableAction, dataDirAction,
+  joinTable, connectStream, openDataDir, exportMarkdown,
+};

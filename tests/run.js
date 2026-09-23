@@ -2011,6 +2011,162 @@ test('所有 JSON 文件不带 BOM 且能解析', () => {
   assert.deepEqual(problems, [], problems.join('\n'));
 });
 
+/* ══════════════════════════ 数据目录配置 ══════════════════════════ */
+
+group('数据目录配置');
+
+const configMod = await (async () => {
+  const { createRequire } = await import('node:module');
+  return createRequire(import.meta.url)('../electron/config.cjs');
+})();
+
+test('没有配置文件时返回默认值', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const cfg = configMod.readConfig(path.join(tmp, 'nope.json'));
+    assert.equal(cfg.dataDir, '');
+    assert.deepEqual(cfg.recentDirs, []);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('配置文件损坏时不崩，退回默认值', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    fs.writeFileSync(file, '{ 这不是 JSON', 'utf8');
+    const cfg = configMod.readConfig(file);
+    assert.equal(cfg.dataDir, '');
+    assert.deepEqual(cfg.recentDirs, []);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('写入后可读回，且是局部合并', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    configMod.writeConfig(file, { dataDir: 'D:\\a' });
+    configMod.writeConfig(file, { recentDirs: ['D:\\a'] });
+    const cfg = configMod.readConfig(file);
+    assert.equal(cfg.dataDir, 'D:\\a', '后一次写入不应抹掉先前字段');
+    assert.deepEqual(cfg.recentDirs, ['D:\\a']);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('最近目录去重且最新在前', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    const A = path.join(tmp, 'A');
+    const B = path.join(tmp, 'B');
+    configMod.rememberDir(file, A);
+    configMod.rememberDir(file, B);
+    configMod.rememberDir(file, A);       // 再次使用 A
+    assert.deepEqual(configMod.readConfig(file).recentDirs, [A, B]);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('最近目录有条数上限', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    for (let i = 0; i < configMod.MAX_RECENT + 5; i++) {
+      configMod.rememberDir(file, path.join(tmp, `dir-${i}`));
+    }
+    const list = configMod.readConfig(file).recentDirs;
+    assert.equal(list.length, configMod.MAX_RECENT);
+    assert.equal(list[0], path.join(tmp, `dir-${configMod.MAX_RECENT + 4}`), '最新的应在最前');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('forgetDir 能移除指定目录', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    const A = path.join(tmp, 'A');
+    const B = path.join(tmp, 'B');
+    configMod.rememberDir(file, A);
+    configMod.rememberDir(file, B);
+    configMod.forgetDir(file, A);
+    assert.deepEqual(configMod.readConfig(file).recentDirs, [B]);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('最近目录会被归一化，等价写法不重复', () => {
+  // 手工编辑过的配置里可能写成 D:\\a\\b（多余分隔符）。
+  // 不归一化的话字符串比较永不相等，当前目录会重复出现在「最近使用」里。
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-cfg-'));
+  try {
+    const file = path.join(tmp, 'config.json');
+    const target = path.join(tmp, 'somedir', 'data');
+    const messy = `${path.join(tmp, 'somedir')}${path.sep}${path.sep}data`;
+
+    configMod.rememberDir(file, messy);
+    configMod.rememberDir(file, target);
+    const list = configMod.readConfig(file).recentDirs;
+    assert.equal(list.length, 1, `等价路径应合并，实际 ${JSON.stringify(list)}`);
+    assert.equal(list[0], path.resolve(target));
+
+    // normalizedRecent 对历史脏数据同样有效
+    fs.writeFileSync(file, JSON.stringify({ recentDirs: [messy, messy, target] }), 'utf8');
+    assert.equal(configMod.normalizedRecent(file).length, 1);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('probeDir 会创建不存在的目录', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-probe-'));
+  try {
+    const target = path.join(tmp, 'a', 'b', 'c');
+    const res = configMod.probeDir(target);
+    assert.equal(res.ok, true, res.reason);
+    assert.equal(fs.existsSync(target), true, '应把目录建出来');
+    assert.equal(res.hasData, false, '新目录应被识别为空的');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('probeDir 识别出已有数据的目录', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-probe-'));
+  try {
+    const target = path.join(tmp, 'data');
+    fs.mkdirSync(path.join(target, 'campaigns', 'c1'), { recursive: true });
+    fs.writeFileSync(path.join(target, 'index.json'), '{"campaigns":[]}', 'utf8');
+    const res = configMod.probeDir(target);
+    assert.equal(res.ok, true);
+    assert.equal(res.hasData, true);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('probeDir 对非法路径给出可读的失败原因', () => {
+  // Windows 上把文件当目录用必然失败
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-probe-'));
+  try {
+    const file = path.join(tmp, 'a-file');
+    fs.writeFileSync(file, 'x', 'utf8');
+    const res = configMod.probeDir(path.join(file, 'sub'));
+    assert.equal(res.ok, false);
+    assert.ok(res.reason && res.reason.length > 0, '失败时必须给出原因');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('copyTree 递归复制且不覆盖已存在的文件', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-copy-'));
+  try {
+    const from = path.join(tmp, 'from');
+    const to = path.join(tmp, 'to');
+    fs.mkdirSync(path.join(from, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(from, 'a.txt'), 'A', 'utf8');
+    fs.writeFileSync(path.join(from, 'sub', 'b.txt'), 'B', 'utf8');
+
+    // 目标里已有一个同名文件，复制不应把它冲掉
+    fs.mkdirSync(to, { recursive: true });
+    fs.writeFileSync(path.join(to, 'a.txt'), '原有内容', 'utf8');
+
+    const n = configMod.copyTree(from, to);
+    assert.equal(n, 1, '只应复制 sub/b.txt 这一个新文件');
+    assert.equal(fs.readFileSync(path.join(to, 'a.txt'), 'utf8'), '原有内容', '已存在的文件不应被覆盖');
+    assert.equal(fs.readFileSync(path.join(to, 'sub', 'b.txt'), 'utf8'), 'B', '新文件应被复制');
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 /* ══════════════════════════ 汇总 ══════════════════════════ */
 
 process.stdout.write(`\n${'─'.repeat(52)}\n`);

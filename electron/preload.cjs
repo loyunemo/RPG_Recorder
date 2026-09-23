@@ -19,6 +19,12 @@ contextBridge.exposeInMainWorld('rwBridge', {
   table: (action, payload) => ipcRenderer.invoke('rw:table', action, payload),
 
   /**
+   * 数据目录操作：
+   *   info / pick / check / set / reset / forget / reveal
+   */
+  dataDir: (action, payload) => ipcRenderer.invoke('rw:dataDir', action, payload),
+
+  /**
    * 订阅本机同步事件（玩家在浏览器里改的东西会推回来）。
    * 返回取消订阅的函数。
    */
