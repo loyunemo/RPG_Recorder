@@ -301,6 +301,18 @@ function createWindow() {
           const steps = [];
           for (let i = 0; i < 5; i++) {
             await shoot(`${c}-${sys}-step${i + 1}`);
+
+            // 记录「技能与领域」这一步有没有领域卡可选
+            const probe = await js(`
+              const groups = document.querySelectorAll('.modal optgroup');
+              const opts = groups.length ? [...groups].reduce((n,g)=>n+g.children.length,0) : 0;
+              const picker = [...document.querySelectorAll('.modal select')].some(s =>
+                (s.options[0]?.textContent || '').includes('添加领域卡'));
+              return { 领域卡选项: opts, 有领域选择器: picker };`);
+            if (probe && probe.有领域选择器) {
+              console.log(`[wiz] ${sys} 第${i + 1}步：领域选择器 ✓，可选 ${probe.领域卡选项} 张`);
+            }
+
             const next = await js(`
               const btns = [...document.querySelectorAll('.modal button')];
               const n = btns.find(b => b.textContent.trim() === '下一步');
@@ -313,7 +325,13 @@ function createWindow() {
             await sleep(600);
           }
           console.log('[wiz] ' + sys + ' 步骤流转：' + steps.join(' → '));
-          await js(`document.querySelector('.modal-foot button')?.click(); return true;`);  // 取消
+
+          // 关掉弹窗 —— 必须点「取消」，第一个按钮可能是「上一步」，点了不会关
+          await js(`
+            const b = [...document.querySelectorAll('.modal-foot button')]
+              .find(x => x.textContent.trim() === '取消');
+            if (b) b.click();
+            return true;`);
           await sleep(400);
         }
       } catch (err) {

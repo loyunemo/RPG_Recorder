@@ -1,6 +1,6 @@
 {
   "name": "rpg-recorder",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "跑团记录系统 — 多人牌桌 · 骰子判定 · 战斗追踪 · 事件日志 · 角色卡（COC 7e / DND 5e / 匕首心 / 华渚）",
   "author": "loyunemo <12560073@zju.edu.cn>",

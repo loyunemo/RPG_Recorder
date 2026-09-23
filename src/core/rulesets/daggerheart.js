@@ -88,9 +88,17 @@ export const DH_DATA_SOURCE = sourceData;
 
 const DH_CLASS_BY_NAME = new Map(DH_CLASSES.map(c => [c.name, c]));
 
-/** 某个职业的两个领域 */
-export function domainsOfClass(className) {
-  return DH_CLASS_BY_NAME.get(className)?.domains || [];
+/**
+ * 某个职业的两个领域。
+ *
+ * 入参既接受角色数据对象（界面向导与卡面都是这么调的），
+ * 也接受职业名字符串（方便测试与直接查询）。
+ * 之前只接受字符串，而界面传的是数据对象，导致领域卡列表恒为空 ——
+ * 玩家选不到领域卡，车卡就永远完不成。
+ */
+export function domainsOfClass(input) {
+  const name = typeof input === 'string' ? input : input?.className;
+  return DH_CLASS_BY_NAME.get(name)?.domains || [];
 }
 
 /** 某个职业的子职业 */

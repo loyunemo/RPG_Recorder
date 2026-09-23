@@ -250,8 +250,15 @@ function initiative(data) {
 
 const TRAIT_SET = DH_TRAIT_ARRAY;   // [+2, +1, +1, 0, 0, −1]
 
-/** 某个法门 + 宗门可用的领域列表 */
-function usableDomains(data) {
+/**
+ * 某个法门 + 宗门可用的领域列表。
+ *
+ * 入参统一接受角色数据对象；为与匕首心保持一致，也接受法门名（此时只有第一个领域）。
+ * 两个规则集的 `creation.usableDomains` 必须是同一种签名 ——
+ * 否则界面按一种约定调用、规则集按另一种实现，会静默返回空列表。
+ */
+function usableDomains(input) {
+  const data = typeof input === 'string' ? { className: input } : (input || {});
   const cls = CLASS_BY_NAME.get(data.className);
   const sub = (cls?.subclasses || []).find(s => s.name === data.subclass);
   const list = [];

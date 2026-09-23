@@ -15,6 +15,9 @@ import { getRuleset } from '../src/core/rulesets/index.js';
 import coc7 from '../src/core/rulesets/coc7.js';
 import dnd5e from '../src/core/rulesets/dnd5e.js';
 import daggerheart from '../src/core/rulesets/daggerheart.js';
+// 华渚要放到文件顶部 import：它是 const 声明，在后面才写会落进暂时性死区，
+// 前面任何用到它的用例都会抛「Cannot access 'HZ' before initialization」
+import HZ from '../src/core/rulesets/huazhu/index.js';
 
 let passed = 0;
 let failed = 0;
@@ -578,6 +581,51 @@ test('车卡可用的领域 = 职业的两个领域', () => {
   assert.deepEqual(daggerheart.creation.usableDomains('不存在的职业'), []);
 });
 
+test('usableDomains 传数据对象与传职业名结果一致（匕首心）/ 互为超集（华渚）', () => {
+  // 这条是为了防住一个让车卡彻底走不下去的 bug：
+  // 匕首心的 usableDomains 只接受职业名字符串，而界面向导传的是数据对象，
+  // 于是 DH_CLASS_BY_NAME.get(对象) 得到 undefined，领域卡列表恒为空 ——
+  // 玩家选不到领域卡，校验又要求必须有 2 张，车卡永远完不成。
+  const dh = daggerheart.createDefault('测试');
+  const dhByData = daggerheart.creation.usableDomains(dh);
+  const dhByName = daggerheart.creation.usableDomains(dh.className);
+  assert.ok(dhByData.length > 0, '匕首心：传数据对象应返回非空领域列表');
+  assert.deepEqual(dhByData, dhByName, '匕首心：两种入参结果应一致');
+
+  // 华渚不同：法门只给第一个领域，第二个来自宗门。
+  // 所以只传法门名时少一个是正确的，只要求「数据对象的结果是它的超集」。
+  const hz = HZ.createDefault('测试');
+  const hzByData = HZ.creation.usableDomains(hz);
+  const hzByName = HZ.creation.usableDomains(hz.className);
+  assert.ok(hzByName.length > 0, '华渚：传法门名应至少给出一个领域');
+  assert.ok(hzByData.length >= hzByName.length, '华渚：带宗门的数据对象不应少于只传法门名');
+  for (const d of hzByName) {
+    assert.ok(hzByData.includes(d), `华渚：数据对象的结果应包含 ${d}`);
+  }
+});
+
+test('匕首心的领域卡能按职业领域取到', () => {
+  const data = daggerheart.createDefault('测试');
+  data.className = '战士';
+  const usable = daggerheart.creation.usableDomains(data);
+  const cards = daggerheart.domainCards.filter(c => usable.includes(c.domain));
+  assert.equal(cards.length, 42, `战士应能选到 42 张卡，实际 ${cards.length}`);
+});
+
+test('华渚的领域卡能按法门与宗门取到', () => {
+  const data = HZ.createDefault('测试');
+  data.className = '剑修';
+  const cls = HZ.classes.find(c => c.name === '剑修');
+  data.subclass = cls.subclasses[0].name;
+  const usable = HZ.creation.usableDomains(data);
+  assert.ok(usable.length >= 1);
+
+  // 华渚的领域卡用 id 关联、usableDomains 返回的是名称，需要经领域表转换
+  const byName = new Map(HZ.domains.map(d => [d.name, d]));
+  const cards = HZ.domainCards.filter(c => usable.some(n => byName.get(n)?.id === c.domain));
+  assert.ok(cards.length > 0, '应能取到领域卡');
+});
+
 test('护甲表数值与 SRD 一致', () => {
   const byName = Object.fromEntries(daggerheart.armors.map(a => [a.name, a]));
   assert.deepEqual(
@@ -934,8 +982,6 @@ test('匕首心用 1d20 + 敏捷属性', () => {
 /* ══════════════════════════ 华渚框架 ══════════════════════════ */
 
 group('华渚框架数据完整性');
-
-const HZ = (await import('../src/core/rulesets/huazhu/index.js')).default;
 
 test('13 个法门全部提取到位', () => {
   assert.equal(HZ.classes.length, 13, `实际 ${HZ.classes.length} 个`);
