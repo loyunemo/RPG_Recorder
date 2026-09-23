@@ -2,7 +2,7 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.5.0] — 未发布
+## [0.5.0] — 2026-09-21
 
 ### 新增
 - **匕首心车卡数据补全**：从 [DHSheet · 匕首之心车卡器](https://dhsheet.site/)
@@ -35,6 +35,18 @@
   中文翻译由 RidRisR、PolearmMaster、末楔、里予、一得完成，本项目保留完整署名
 - 上游的 `automation` 字段（卡牌自动化引擎）**未导入** —— 那是另一套执行模型，
   与本项目的判定机制不兼容；本次只取其展示数据
+- 上游的武器 / 护甲表是 TypeScript 源码而非 JSON，本次未导入；
+  匕首心的护甲沿用既有数据（英文 SRD 与官方中文规则书交叉核对）
+
+### 发布产物
+
+| 文件 | 大小 | SHA256 |
+| --- | --- | --- |
+| `RPG-Recorder-Setup-0.5.0.exe` | 76.7 MB | `269CE7DD0F9500640D390BA049D4CA29CD7F4FD462C4FE1505A1F53889F13EF9` |
+| `RPG-Recorder-0.5.0-portable.exe` | 76.4 MB | `160398F9856AD7158272EEC07D67DB094B7181CC4F3BCCCC03D3BD8C6AB52496` |
+
+两个版本都是 64 位 Windows 程序，共用 `%APPDATA%\rpg-recorder\data` 作为数据目录。
+安装包未做代码签名，首次运行会被 SmartScreen 拦一下。
 
 ---
 
