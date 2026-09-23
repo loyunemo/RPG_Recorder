@@ -11,7 +11,7 @@ import { getRuleset } from '../../core/rulesets/index.js';
 import { platform } from '../platform.js';
 import {
   combatantFromCharacter, blankCombatant, setTrackValue, getTrack,
-  combatantActions, combatantData,
+  combatantActions, combatantData, defaultActionTarget,
 } from '../characterOps.js';
 import {
   actionFromPreset, describeAction, describeActionResult, describeCost,
@@ -223,8 +223,7 @@ function actionBar(app, combat, actor, list) {
   const kinds = kindsFor(rs.id);
 
   const others = list.filter(c => c.id !== actor.id);
-  // 默认瞄准第一个还站着的敌人；没有就退而选第一个目标
-  const defaultTarget = others.find(c => !c.defeated) || others[0] || null;
+  const defaultTarget = defaultActionTarget(actor, others);
 
   const targetSel = h('select.select', {
     style: { flex: '1', minWidth: '130px' },

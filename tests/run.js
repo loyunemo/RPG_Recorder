@@ -24,6 +24,7 @@ import daggerheart from '../src/core/rulesets/daggerheart.js';
 // 华渚要放到文件顶部 import：它是 const 声明，在后面才写会落进暂时性死区，
 // 前面任何用到它的用例都会抛「Cannot access 'HZ' before initialization」
 import HZ from '../src/core/rulesets/huazhu/index.js';
+import { defaultActionTarget } from '../src/renderer/characterOps.js';
 
 let passed = 0;
 let failed = 0;
@@ -2394,8 +2395,31 @@ test('DND 主要动作每回合一次，反应每轮一次', () => {
   assert.equal(canUseKind(used, 'pc', 'reaction'), false, '同一轮反应不恢复');
 });
 
-/* ══════════════════════════ 数据目录配置 ══════════════════════════ */
+test('行动条默认瞄准敌方而不是队友', () => {
+  const pc = { id: 'p1', kind: 'pc', name: '我' };
+  const ally = { id: 'p2', kind: 'pc', name: '队友' };
+  const foe = { id: 'n1', kind: 'npc', name: '哥布林' };
+  // PC 行动时不该默认打队友
+  assert.equal(defaultActionTarget(pc, [ally, foe]).id, 'n1');
+  // NPC 行动时默认打 PC
+  assert.equal(defaultActionTarget(foe, [ally, { id: 'n2', kind: 'npc' }]).id, 'p2');
+});
 
+test('优先挑还站着的目标', () => {
+  const pc = { id: 'p1', kind: 'pc' };
+  const down = { id: 'n1', kind: 'npc', defeated: true };
+  const up = { id: 'n2', kind: 'npc' };
+  assert.equal(defaultActionTarget(pc, [down, up]).id, 'n2');
+  // 敌方全倒地了就退而选一个倒地的，总比没有目标强
+  assert.equal(defaultActionTarget(pc, [down]).id, 'n1');
+});
+
+test('没有可选目标时返回 null', () => {
+  assert.equal(defaultActionTarget({ id: 'p1', kind: 'pc' }, []), null);
+  assert.equal(defaultActionTarget({ id: 'p1', kind: 'pc' }, null), null);
+});
+
+/* ══════════════════════════ 数据目录配置 ══════════════════════════ */
 group('数据目录配置');
 
 const configMod = await (async () => {

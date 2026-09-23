@@ -138,3 +138,16 @@ export function combatantActions(app, combatant) {
   if (data) return normalizeActions(data.actions);
   return normalizeActions(combatant?.actions);
 }
+
+/**
+ * 行动条默认瞄准谁：PC 先找 NPC，NPC 先找 PC；同阵营里挑第一个还站着的。
+ * 都倒地了就退而选第一个能选的目标。纯函数，方便单独验证。
+ */
+export function defaultActionTarget(actor, candidates) {
+  const list = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
+  if (!list.length) return null;
+  const hostile = (c) => (actor?.kind === 'pc' ? c.kind !== 'pc' : c.kind === 'pc');
+  return list.find(c => hostile(c) && !c.defeated)
+    || list.find(c => !c.defeated)
+    || list[0];
+}
