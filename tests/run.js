@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 import { RNG, newSeed, xmur3, mulberry32 } from '../src/core/rng.js';
 import { rollExpr, parseExpression, rollPercentile, DiceError } from '../src/core/dice.js';
@@ -25,6 +26,7 @@ import daggerheart from '../src/core/rulesets/daggerheart.js';
 // 前面任何用到它的用例都会抛「Cannot access 'HZ' before initialization」
 import HZ from '../src/core/rulesets/huazhu/index.js';
 import { defaultActionTarget } from '../src/renderer/characterOps.js';
+import { stepTurnIndex, standingIndexes, hasStanding } from '../src/core/turn.js';
 
 let passed = 0;
 let failed = 0;
@@ -2198,13 +2200,31 @@ test('判定失败时不掷伤害', () => {
   assert.equal(res.damage, null, '失败不该掷伤害');
 });
 
-test('未设难度时 success 为 null，仍会掷伤害', () => {
+test('未设难度时不会判失败，仍会掷伤害', () => {
   const data = daggerheart.createDefault('测试');
   data.traits.strength = 2;
   const action = actionFromPreset(daggerheart.actionPresets.find(p => p.name === '攻击判定'));
-  const res = resolveAction(daggerheart, data, action, new RNG(newSeed()));
-  assert.equal(res.check.success, null, '匕首心默认不设难度');
-  assert.ok(res.damage?.ok, '无难度时应照常掷伤害');
+
+  // 没设难度 → 只有「会心一击」才会给出 success: true，其余一律 null，绝不会是 false
+  const seen = new Set();
+  for (let i = 0; i < 200; i++) {
+    const res = resolveAction(daggerheart, data, action, new RNG(`DH-${i}`));
+    seen.add(res.check.success);
+    assert.notEqual(res.check.success, false, '没设难度就不该判成失败');
+    assert.ok(res.damage?.ok, '无难度时应照常掷伤害');
+  }
+  assert.ok(seen.has(null), '多数情况下 success 应为 null（未设难度）');
+});
+
+test('两骰相同即会心一击：自动成功并照常结算伤害', () => {
+  const data = daggerheart.createDefault('测试');
+  data.traits.strength = 2;
+  const action = actionFromPreset(daggerheart.actionPresets.find(p => p.name === '攻击判定'));
+  // 希望骰与恐惧骰同为 7
+  const res = resolveAction(daggerheart, data, action, new FakeRng([7, 7, 4]));
+  assert.equal(res.check.critical, true);
+  assert.equal(res.check.success, true, '会心一击自动成功');
+  assert.equal(res.damageTotal, 4);
 });
 
 test('反应类行动在匕首心里标记为 reaction（不产生希望/恐惧）', () => {
@@ -2417,6 +2437,159 @@ test('优先挑还站着的目标', () => {
 test('没有可选目标时返回 null', () => {
   assert.equal(defaultActionTarget({ id: 'p1', kind: 'pc' }, []), null);
   assert.equal(defaultActionTarget({ id: 'p1', kind: 'pc' }, null), null);
+});
+
+/* ══════════════════════════ 回合推进 ══════════════════════════ */
+
+group('回合推进');
+
+const cb = (name, defeated = false) => ({ id: name, name, defeated });
+const order = (list, from, dir = 1) => {
+  const r = stepTurnIndex(list, from, dir);
+  return r && `${r.index}/${r.roundDelta}`;
+};
+
+test('正常轮流：走到下一位不跨轮', () => {
+  const list = [cb('a'), cb('b'), cb('c')];
+  assert.equal(order(list, 0, 1), '1/0');
+  assert.equal(order(list, 1, 1), '2/0');
+});
+
+test('走到末尾跨轮，roundDelta 为 +1', () => {
+  const list = [cb('a'), cb('b'), cb('c')];
+  assert.equal(order(list, 2, 1), '0/1');
+});
+
+test('往回走跨轮，roundDelta 为 −1', () => {
+  const list = [cb('a'), cb('b'), cb('c')];
+  assert.equal(order(list, 0, -1), '2/-1');
+  assert.equal(order(list, 1, -1), '0/0');
+});
+
+test('跳过已倒地的参战者', () => {
+  const list = [cb('a'), cb('b', true), cb('c')];
+  const r = stepTurnIndex(list, 0, 1);
+  assert.equal(r.index, 2);
+  assert.equal(r.skipped, 1);
+  assert.equal(r.roundDelta, 0, '同一轮里跳过不该算跨轮');
+});
+
+test('连续跳过多个倒地者并跨轮', () => {
+  const list = [cb('a'), cb('b'), cb('c', true), cb('d', true)];
+  const r = stepTurnIndex(list, 1, 1);
+  assert.equal(r.index, 0, 'c 与 d 都倒地，绕回 a');
+  assert.equal(r.roundDelta, 1);
+  assert.equal(r.skipped, 2);
+});
+
+test('只剩自己站着时绕一圈回到自己并跨轮', () => {
+  const list = [cb('a'), cb('b', true), cb('c', true)];
+  const r = stepTurnIndex(list, 0, 1);
+  assert.equal(r.index, 0);
+  assert.equal(r.roundDelta, 1);
+  assert.equal(r.skipped, 2);
+});
+
+test('全员倒地时不推进，返回 null', () => {
+  const list = [cb('a', true), cb('b', true)];
+  assert.equal(stepTurnIndex(list, 0, 1), null);
+  assert.equal(stepTurnIndex(list, 1, -1), null);
+  assert.equal(hasStanding(list), false);
+});
+
+test('空列表返回 null', () => {
+  assert.equal(stepTurnIndex([], 0, 1), null);
+  assert.equal(stepTurnIndex(null, 0, 1), null);
+});
+
+test('standingIndexes 只数还站着的', () => {
+  const list = [cb('a'), cb('b', true), cb('c'), cb('d', true)];
+  assert.deepEqual(standingIndexes(list), [0, 2]);
+  assert.equal(standingIndexes([]).length, 0);
+});
+
+test('倒地的当前行动者：从自己往后找到下一个站着的', () => {
+  const list = [cb('a'), cb('b'), cb('c')];
+  list[1].defeated = true;
+  const r = stepTurnIndex(list, 1, 1);
+  assert.equal(r.index, 2, '自己倒了就从自己往后找');
+});
+
+/* ══════════════════════════ 演示数据 ══════════════════════════ */
+
+group('演示数据');
+
+test('演示数据里每个角色都声明了行动，且留了一场进行中的示范战斗', () => {
+  const root = path.join(import.meta.dirname, '..');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-seed-'));
+
+  // 跑一遍种子脚本（stdio 交给它自己，不抓输出），再直接读它写出的文件
+  const res = spawnSync(process.execPath, [path.join(root, 'scripts', 'seed-demo.cjs')], {
+    cwd: root,
+    env: { ...process.env, RW_DATA_DIR: tmp },
+    stdio: 'ignore',
+  });
+  assert.equal(res.status, 0, `种子脚本退出码 ${res.status}`);
+
+  const index = JSON.parse(fs.readFileSync(path.join(tmp, 'index.json'), 'utf8'));
+  assert.ok(index.campaigns.length >= 4, `演示战役太少：${index.campaigns.length}`);
+
+  const systems = new Set();
+  let activeCombats = 0;
+  let combatantsWithActions = 0;
+  let combatantsTotal = 0;
+
+  for (const camp of index.campaigns) {
+    systems.add(camp.system);
+    const dir = path.join(tmp, 'campaigns', camp.id);
+
+    // 每个角色都要有行动 —— 战斗里只能按已声明的行动结算
+    const charDir = path.join(dir, 'characters');
+    for (const f of fs.readdirSync(charDir).filter(x => x.endsWith('.json'))) {
+      const char = JSON.parse(fs.readFileSync(path.join(charDir, f), 'utf8'));
+      const n = (char.data?.actions || []).length;
+      assert.ok(n > 0, `${camp.name} 的角色「${char.name}」没有声明任何行动`);
+    }
+
+    const statePath = path.join(dir, 'state.json');
+    if (!fs.existsSync(statePath)) continue;
+    const combat = JSON.parse(fs.readFileSync(statePath, 'utf8')).combat;
+    if (!combat?.active) continue;
+    activeCombats++;
+
+    const chars = fs.readdirSync(charDir).filter(x => x.endsWith('.json'))
+      .map(f => JSON.parse(fs.readFileSync(path.join(charDir, f), 'utf8')));
+
+    for (const cb of combat.combatants) {
+      combatantsTotal++;
+      const declared = cb.refId
+        ? (chars.find(c => c.id === cb.refId)?.data?.actions || []).length
+        : (cb.actions || []).length;
+      if (declared > 0) combatantsWithActions++;
+      else assert.fail(`示范战斗里的「${cb.name}」没有声明行动`);
+    }
+
+    // 示范战斗要能演示「行动经济已用掉」这个状态
+    assert.ok(Object.keys(combat.used || {}).length > 0,
+      '示范战斗应至少有一名参战者用掉了行动经济');
+    assert.ok(combat.combatants.some(c => c.defeated),
+      '示范战斗里应有一个已倒地的参战者，用来演示回合跳过');
+
+    // 参战者 id 必须唯一 —— 行动经济、选中的目标都按 id 找，
+    // 重名会让「已经用掉的主要动作」串到别人身上
+    const ids = combat.combatants.map(c => c.id);
+    assert.equal(new Set(ids).size, ids.length, `示范战斗的参战者 id 有重复：${ids.join(', ')}`);
+    for (const id of ids) assert.ok(id, '参战者 id 不能为空');
+  }
+
+  assert.equal(activeCombats, 1, '演示数据只该留一场进行中的战斗');
+  assert.ok(combatantsTotal >= 3, `示范战斗参战者太少：${combatantsTotal}`);
+  assert.equal(combatantsWithActions, combatantsTotal);
+  for (const s of ['coc7', 'dnd5e', 'daggerheart', 'huazhu']) {
+    assert.ok(systems.has(s), `演示数据缺少 ${s} 的战役`);
+  }
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 /* ══════════════════════════ 数据目录配置 ══════════════════════════ */

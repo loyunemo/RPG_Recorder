@@ -554,22 +554,33 @@ function createWindow() {
         await sleep(600);
         const bar = await js(`
           const btns = [...document.querySelectorAll('.action-btn')];
-          return { count: btns.length, names: btns.map(b => b.dataset.action).slice(0, 4).join(' / ') };`);
-        // 当前行动者可能没声明行动（比如刚加进来的杂兵），往后翻几个回合找一个有的
+          return {
+            count: btns.length,
+            usable: btns.filter(b => !b.disabled).length,
+            names: btns.filter(b => !b.disabled).map(b => b.dataset.action).slice(0, 4).join(' / '),
+          };`);
+        // 当前行动者可能没声明行动，或者行动经济已经用光（演示战斗里主要动作是花掉的），
+        // 往后翻几个回合找一个还能点的
         let turns = 0;
-        while (!(await js(`return document.querySelectorAll('.action-btn').length > 0;`)) && turns < 8) {
+        const usableNow = () => js(`return [...document.querySelectorAll('.action-btn')].some(b => !b.disabled);`);
+        while (!(await usableNow()) && turns < 8) {
           await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('下一回合'))?.click(); return true;`);
           await sleep(450);
           turns++;
         }
         const nowOn = await js(`
           const btns = [...document.querySelectorAll('.action-btn')];
-          return { count: btns.length, names: btns.map(b => b.dataset.action).slice(0, 4).join(' / ') };`);
-        console.log(`[shot] 行动条按钮：开局 ${bar?.count ?? 0} 个，跳过 ${turns} 个回合后 ${nowOn?.count ?? 0} 个`
+          return {
+            count: btns.length,
+            usable: btns.filter(b => !b.disabled).length,
+            names: btns.filter(b => !b.disabled).map(b => b.dataset.action).slice(0, 4).join(' / '),
+          };`);
+        console.log(`[shot] 行动条按钮：开局 ${bar?.count ?? 0} 个（可点 ${bar?.usable ?? 0}）`
+          + `，跳过 ${turns} 个回合后 ${nowOn?.count ?? 0} 个（可点 ${nowOn?.usable ?? 0}）`
           + `${nowOn?.names ? ' → ' + nowOn.names : ''}`);
         const before = await js(`return document.body.innerText;`);
         const used = await js(`
-          const b = document.querySelector('.action-btn');
+          const b = [...document.querySelectorAll('.action-btn')].find(x => !x.disabled);
           if (!b) return null;
           b.click();
           return b.dataset.action;`);
@@ -595,6 +606,36 @@ function createWindow() {
           const all = [...document.querySelectorAll('.action-btn')];
           return all.filter(b => b.dataset.spent === '1').length;`);
         console.log('[shot] 推进回合后仍在「已用」状态的按钮：', after2);
+
+        // 把当前行动者打到 0 血：回合应该自动交给下一个还站着的人
+        const curName = () => js(`
+          const row = document.querySelector('[data-current="1"]');
+          if (!row) return null;
+          const hp = row.querySelector('.bar .txt')?.textContent || '';
+          return (row.dataset.combatant || '?') + ' ' + hp + ' 倒地=' + row.dataset.defeated;`);
+        const beforeDown = await curName();
+        await js(`
+          const row = document.querySelector('[data-current="1"]');
+          const inp = row?.querySelector('input[title="直接设定当前生命值"]');
+          if (!inp) return false;
+          inp.value = '1';
+          inp.dispatchEvent(new Event('change'));
+          return true;`);
+        await sleep(600);
+        await js(`
+          const row = document.querySelector('[data-current="1"]');
+          const b = [...(row?.querySelectorAll('button') || [])].find(x => x.textContent.trim() === '−5');
+          if (!b) return false;
+          b.click();
+          return true;`);
+        await sleep(800);
+        const afterDown = await curName();
+        const downed = await js(`
+          const row = document.querySelector('[data-current="1"]');
+          return row ? row.dataset.defeated === '1' : null;`);
+        console.log(`[shot] 打倒当前行动者：${beforeDown} → ${afterDown}`
+          + `（新行动者已倒地=${downed}）${beforeDown !== afterDown ? '，回合已自动交出' : '，回合没动'}`);
+        await shoot(`${c}-handoff`);
 
         // 战斗进行中，判定页应被收敛为「只能从已声明的行动里选」
         await clickTab(0);

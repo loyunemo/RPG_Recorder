@@ -13,6 +13,7 @@ import {
   combatantFromCharacter, blankCombatant, setTrackValue, getTrack,
   combatantActions, combatantData, defaultActionTarget,
 } from '../characterOps.js';
+import { stepTurnIndex, standingIndexes } from '../../core/turn.js';
 import {
   actionFromPreset, describeAction, describeActionResult, describeCost,
   resolveAction, kindsFor, normalizeActions, expandDamageExpr,
@@ -129,14 +130,19 @@ function renderCombatReadOnly(container, app, combat) {
 function controlCard(app, combat) {
   const list = sortedCombatants(combat);
   const current = list[combat.turnIndex] || null;
+  const standing = standingIndexes(list).length;
 
   const head = h('h3', {}, '战斗控制',
     combat.active ? h('span.badge', { style: { background: '#5a2f2c', color: '#ffc9c5' } }, '进行中') : null,
     h('div.spacer'),
     combat.active
-      ? h('span.tiny.muted', {}, `回合 ${combat.round} · ${combat.turnIndex + 1}/${list.length}`)
+      ? h('span.tiny.muted', {}, `回合 ${combat.round} · 第 ${combat.turnIndex + 1}/${list.length} 位`
+        + ` · 还站着 ${standing} 人`)
       : h('span.tiny.muted', {}, `${list.length} 名参战者`),
   );
+
+  // 没开始战斗时先把「谁没有行动」说清楚，免得开打了才发现轮到他无从结算
+  const noActions = combat.combatants.filter(c => !combatantActions(app, c).length);
 
   const row = h('div.row.wrap');
 
@@ -206,10 +212,32 @@ function controlCard(app, combat) {
     ));
   }
 
+  if (noActions.length) {
+    body.appendChild(h('div', {
+      style: {
+        background: '#2a2318', border: '1px solid #5a4a24',
+        borderRadius: 'var(--radius)', padding: '9px 12px', lineHeight: 1.8,
+      },
+    },
+      h('div', { style: { fontSize: '12.5px', color: '#ffd79a', fontWeight: 600 } },
+        `有 ${noActions.length} 名参战者还没声明行动`),
+      h('div.tiny.muted', {},
+        noActions.map(c => c.name).join('、'),
+        ' —— 战斗里只能按已声明的行动结算，轮到他们时回合会白转一圈。'
+        + '加入角色卡时若空着会自动补上预设，手动加的 NPC 也默认带全部预设。'),
+    ));
+  }
+
   return h('div.card', {}, head, body);
 }
 
 /* ────────────────────────── 行动条 ────────────────────────── */
+
+/** 行动条里「展开全部」的状态，按「参战者:行动经济」记 —— 重绘不该把它清掉 */
+const expandedGroups = new Set();
+
+/** 每一类行动经济默认先摆几个，多的折起来，免得一排铺满整屏 */
+const GROUP_LIMIT = 6;
 
 /**
  * 当前行动者可用的行动。
@@ -254,6 +282,35 @@ function actionBar(app, combat, actor, list) {
       actor.kind === 'pc'
         ? '到它的角色卡 →「行动」里添加。'
         : '移除后重新添加，或在添加时选择行动。'));
+
+    // 就地补上预设，省得为了加几个行动跑去角色卡再回来
+    const presets = rs.actionPresets || [];
+    if (presets.length) {
+      wrap.appendChild(h('div.row', { style: { marginTop: '8px' } },
+        h('button.btn.primary.sm', {
+          onclick: async () => {
+            const ok = await confirmDialog('补上行动',
+              `将把「${rs.short}」的 ${presets.length} 个常用预设加到 ${actor.name} 上，之后可以逐个删改。`,
+              '全部添加');
+            if (!ok) return;
+            if (actor.kind === 'pc' && actor.refId) {
+              const char = app.state.characters.find(x => x.id === actor.refId);
+              if (char) {
+                char.data.actions = presets.map(actionFromPreset);
+                await app.persistCharacter(char);
+              }
+            } else {
+              app.updateCombat((c) => {
+                const t = c.combatants.find(x => x.id === actor.id);
+                if (!t) return;
+                t.actions = presets.map(actionFromPreset);
+                if (t.data) t.data.actions = t.actions;
+              });
+            }
+            toast(`已为 ${actor.name} 补上 ${presets.length} 个行动`);
+          },
+        }, `＋ 补上「${rs.short}」的全部 ${presets.length} 个预设`)));
+    }
     return wrap;
   }
 
@@ -267,15 +324,20 @@ function actionBar(app, combat, actor, list) {
 
     const spent = !canUseKind(usage, actor.id, kind.id);
     const scope = scopeOf(kind.id);
+    const key = `${actor.id}:${kind.id}`;
+    const expanded = expandedGroups.has(key);
+    const shown = expanded ? group : group.slice(0, GROUP_LIMIT);
+    const hidden = group.length - shown.length;
 
     wrap.appendChild(h('div', { style: { marginBottom: '7px' } },
       h('div.tiny', { style: { color: spent ? 'var(--muted)' : 'var(--muted)', marginBottom: '4px' } },
         kind.label,
         h('span.tiny.muted', {}, `　${kind.hint}`),
+        h('span.tiny.muted', {}, `　${group.length} 个`),
         spent ? h('span.badge', { style: { marginLeft: '6px', background: '#4a3a1f', color: '#ffd79a' } },
           scope === 'round' ? '本轮已用' : '本回合已用') : null),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px' } },
-        ...group.map((act) => {
+        ...shown.map((act) => {
           // 伤害骰式里的 DB / STR 这类符号按当前行动者展开，免得界面上看到占位符
           const dmg = act.damage ? expandDamageExpr(rs, data || {}, act.damage) : '';
           return h('button.btn.sm.action-btn' + (spent ? '.ghost' : ''), {
@@ -289,6 +351,15 @@ function actionBar(app, combat, actor, list) {
             onclick: () => resolveActorAction(app, actor, act, targetSel.dataset.picked, list),
           }, act.name + (dmg ? ` ⟶ ${dmg}` : ''));
         }),
+        group.length > GROUP_LIMIT
+          ? h('button.btn.sm.ghost.action-more', {
+            title: expanded ? '只显示前几个' : '把这一类行动全部摆出来',
+            onclick: () => {
+              if (expanded) expandedGroups.delete(key); else expandedGroups.add(key);
+              app.renderMain();
+            },
+          }, expanded ? '收起' : `展开全部（还有 ${hidden} 个）`)
+          : null,
       ),
     ));
   }
@@ -382,13 +453,23 @@ function setupCard(app, combat) {
   const pcButtons = available.map(c =>
     h('button.target', {
       onclick: () => {
-        const cb = combatantFromCharacter(getRuleset(c.system || app.state.campaign.system), c);
+        const crs = getRuleset(c.system || app.state.campaign.system);
+        const cb = combatantFromCharacter(crs, c);
         app.updateCombat((x) => { x.combatants.push(cb); });
         app.addEvent({
           type: 'combat', actor: c.id, actorName: c.name,
           title: `加入战斗：${c.name}`,
           detail: `生命 ${cb.hp}/${cb.maxHp} · ${cb.defenseLabel} ${cb.defense ?? '—'}`,
         });
+
+        // 角色卡上还没声明行动就自动补上该系统的常用预设：
+        // 战斗里只能按已声明的行动结算，轮到一张空卡就只能干瞪眼
+        const presets = crs.actionPresets || [];
+        if (!normalizeActions(c.data.actions).length && presets.length) {
+          c.data.actions = presets.map(actionFromPreset);
+          app.persistCharacter(c);
+          toast(`${c.name} 还没有声明行动，已自动补上 ${crs.short} 的 ${presets.length} 个常用预设`);
+        }
       },
     }, h('span', {}, c.name), h('span.tv', {}, `${c.system || app.state.campaign.system}`)));
 
@@ -401,12 +482,24 @@ function setupCard(app, combat) {
   const pending = [];
   const pendingBox = h('div.row.wrap', { style: { gap: '4px', marginTop: '5px' } });
 
+  const pendingHint = h('div.tiny', { style: { marginTop: '4px' } });
   const redrawPending = () => {
     render(pendingBox, ...pending.map((p, i) => h('span.chip', {
       style: { cursor: 'pointer' },
       title: '点击移除',
       onclick: () => { pending.splice(i, 1); redrawPending(); },
     }, `${p.name} ✕`)));
+
+    // 默认就让每个 NPC 都带上行动：战斗里只能按行动结算，没行动的参战者轮到了也白转
+    if (pending.length) {
+      pendingHint.textContent = `将只带上上面这 ${pending.length} 个行动`;
+      pendingHint.style.color = 'var(--text-dim)';
+    } else if (presets.length) {
+      pendingHint.textContent = `没挑就默认带上「${rs.short}」的全部 ${presets.length} 个常用预设`;
+      pendingHint.style.color = 'var(--muted)';
+    } else {
+      pendingHint.textContent = '';
+    }
   };
 
   const presetSel = h('select.select', {
@@ -431,7 +524,8 @@ function setupCard(app, combat) {
     cb.hp = cb.maxHp;
     cb.defense = Number(acInput.value) || 12;
     cb.defenseLabel = rs.id === 'dnd5e' ? 'AC' : rs.id === 'coc7' ? '—' : '闪避';
-    cb.actions = pending.map(actionFromPreset);
+    // 手挑了就用手挑的，没挑就铺上该系统的全部预设
+    cb.actions = (pending.length ? pending : presets).map(actionFromPreset);
     if (cb.data) {
       if (cb.data.combat) { cb.data.combat.hpMax = cb.maxHp; cb.data.combat.hp = cb.hp; }
       if (cb.data.attributes) { /* COC 的属性走默认值，可在角色卡页细化 */ }
@@ -453,6 +547,7 @@ function setupCard(app, combat) {
     nameInput.focus();
   };
   nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addNpc(); });
+  redrawPending();
 
   return h('div.card', {},
     h('h3', {}, '添加参战者'),
@@ -462,6 +557,8 @@ function setupCard(app, combat) {
         pcButtons.length
           ? h('div.target-items', {}, pcButtons)
           : h('div.tiny.muted', {}, '所有角色都已在战斗中'),
+        h('div.tiny.muted', { style: { marginTop: '5px', lineHeight: 1.7 } },
+          '角色卡上还没声明行动的，加入时会自动补上该系统的常用预设 —— 战斗里只能按行动结算。'),
       ),
       h('div.target-group', {},
         h('div.tg-title', {}, '手动添加 NPC'),
@@ -469,6 +566,7 @@ function setupCard(app, combat) {
           h('button.btn', { onclick: addNpc }, '＋ 添加')),
         h('div.row.wrap', { style: { marginTop: '6px' } }, presetSel),
         pendingBox,
+        pendingHint,
         h('div.tiny.muted', { style: { marginTop: '5px', lineHeight: 1.7 } },
           '给 NPC 指定行动后，战斗中轮到它时才能结算；没指定行动就只能记生命与状态。'
           + 'NPC 的判定数值取自规则集的默认值，需要精确数值可以之后在角色卡里细化。'),
@@ -554,6 +652,9 @@ function combatantRow(app, combat, cb, index) {
       }, cond)));
 
   return h('div', {
+    'data-combatant': cb.id,
+    'data-current': isCurrent ? '1' : '0',
+    'data-defeated': cb.defeated ? '1' : '0',
     style: {
       background: isCurrent ? 'var(--bg-3)' : 'var(--bg-2)',
       border: `1px solid ${isCurrent ? 'var(--accent-dim)' : 'var(--border-soft)'}`,
@@ -588,6 +689,10 @@ function combatantRow(app, combat, cb, index) {
             title: `${cb.name} ${next ? '倒地' : '重新站起'}`,
             detail: `剩余生命 ${cb.hp}/${cb.maxHp}`,
           });
+
+          // 倒下的正好是当前行动者：把回合交给下一个还站着的人，
+          // 免得所有人都打完了还得在尸体上按一次「下一回合」
+          if (next) handOffIfDowned(app, cb);
         },
       }, cb.defeated ? '起身' : '倒地'),
       h('button.btn.sm.ghost', {
@@ -610,12 +715,14 @@ function combatantRow(app, combat, cb, index) {
 
 function applyHp(app, cb, delta, verb) {
   if (!delta) return;
+  const wasHp = app.state.combat.combatants.find(x => x.id === cb.id)?.hp ?? 0;
   app.updateCombat((c) => {
     const t = c.combatants.find(x => x.id === cb.id);
     if (!t) return;
     t.hp = Math.max(0, Math.min(t.maxHp, t.hp + delta));
     if (t.hp === 0) t.defeated = true;
   });
+  const justDown = wasHp > 0 && (app.state.combat.combatants.find(x => x.id === cb.id)?.hp ?? 0) === 0;
 
   // 绑定角色卡的参战者，生命值同步写回角色卡
   if (cb.kind === 'pc' && cb.refId) {
@@ -643,33 +750,68 @@ function applyHp(app, cb, delta, verb) {
     detail: `生命值 ${target?.hp ?? '?'}/${cb.maxHp}${target?.defeated ? '（已倒地）' : ''}`,
     tags: [heal ? '治疗' : '伤害'],
   });
+
+  // 刚被打倒的正好是当前行动者：把回合交出去，别让所有人对着尸体按「下一回合」
+  if (justDown) handOffIfDowned(app, cb);
+}
+
+/**
+ * 当前行动者倒下后，把回合交给下一个还站着的人。
+ * 手动点「倒地」和扣血扣到 0 都会走到这里。
+ */
+function handOffIfDowned(app, cb) {
+  if (!app.state.combat.active) return;
+  const list = sortedCombatants(app.state.combat);
+  if (list[app.state.combat.turnIndex]?.id !== cb.id) return;
+
+  const step = stepTurnIndex(list, app.state.combat.turnIndex, 1);
+  if (!step) {
+    toast('所有参战者都已倒地', true);
+    return;
+  }
+  const round = Math.max(1, app.state.combat.round + step.roundDelta);
+  const advancedRound = round !== app.state.combat.round;
+  const incoming = list[step.index];
+  app.updateCombat((c) => {
+    c.round = round;
+    c.turnIndex = step.index;
+    c.used = refreshUsage(c.used || {}, incoming?.id ?? null, advancedRound);
+  });
+  toast(`${cb.name} 已倒地，回合交给 ${incoming?.name || '下一位'}`);
 }
 
 function stepTurn(app, dir) {
   const combat = app.state.combat;
-  const n = combat.combatants.length;
-  if (!n) return;
+  const list = sortedCombatants(combat);
+  if (!list.length) return;
 
-  let round = combat.round;
-  let turn = combat.turnIndex + dir;
+  const step = stepTurnIndex(list, combat.turnIndex, dir);
+  if (!step) {
+    toast('所有参战者都已倒地，回合不再推进', true);
+    return;
+  }
 
-  if (turn >= n) { turn = 0; round += 1; }
-  if (turn < 0) { turn = n - 1; round = Math.max(1, round - 1); }
-
+  const round = Math.max(1, combat.round + step.roundDelta);
   const rolledRound = round !== combat.round;
+  const incoming = list[step.index];
+
   // 轮到谁谁拿回「每回合」的行动经济；进了新一轮则所有人都拿回反应
-  const incoming = sortedCombatants(combat)[turn];
   app.updateCombat((c) => {
     c.round = round;
-    c.turnIndex = turn;
+    c.turnIndex = step.index;
     c.used = refreshUsage(c.used || {}, incoming?.id ?? null, rolledRound);
   });
+
+  if (step.skipped) {
+    toast(`跳过 ${step.skipped} 名已倒地的参战者`);
+  }
 
   if (rolledRound && dir > 0) {
     app.addEvent({
       type: 'combat',
       title: `进入第 ${round} 回合`,
-      detail: sortedCombatants(app.state.combat).map(c => `${c.name} ${c.hp}/${c.maxHp}`).join('\n'),
+      detail: sortedCombatants(app.state.combat)
+        .map(c => `${c.name} ${c.hp}/${c.maxHp}${c.defeated ? '（倒地）' : ''}`).join('\n'),
     });
   }
 }

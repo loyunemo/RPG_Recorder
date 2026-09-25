@@ -4,6 +4,10 @@
  * 用法：node scripts/seed-demo.cjs
  * 数据写入 RW_DATA_DIR（默认为项目下的 data/ 目录）。
  * 想区分演示数据与正式数据，可先设 RW_DATA_DIR 指向别的目录。
+ *
+ * 演示内容里特意留了一场**进行中的战斗**（见文件末尾的 DEMO_BATTLE），
+ * 每个参战者都声明过行动、且已经用掉了一个主要动作 ——
+ * 打开「灰鹰地窟」就能直接看到行动条怎么用，不用先自己配。
  */
 
 const path = require('node:path');
@@ -15,6 +19,56 @@ const ROOT = process.env.RW_DATA_DIR
 
 const store = new Store(ROOT);
 console.log('数据目录：', store.root);
+
+/* ── 演示用的行动 ──
+ * 与各规则集 src/core/rulesets/* 里的 actionPresets 对应。
+ * 这里写死不引 ESM 预设，是为了让种子脚本保持纯同步；
+ * 数值与预设同源，改了预设这里不跟也不会坏 —— 演示角色本来就可以随便改。
+ */
+let actSeq = 0;
+const act = (name, kind, target, check, damage, note) => ({
+  id: `act_demo${++actSeq}`,
+  name, kind, target,
+  check: check || {},
+  damage: damage || '',
+  cost: {},
+  note: note || '',
+});
+
+const DEMO_ACTIONS = {
+  coc7: [
+    act('格斗攻击', 'action', 'enemy', { targetKey: 'skill:格斗（斗殴）', difficulty: 'regular' }, '1d3+DB', '近身肉搏，伤害加值取自 STR+SIZ'),
+    act('手枪射击', 'action', 'enemy', { targetKey: 'skill:射击（手枪）' }, '1d10', '射程内单发射击'),
+    act('闪避', 'reaction', 'self', { targetKey: 'skill:闪避' }, '', '被攻击时与之对抗'),
+    act('侦察', 'action', 'none', { targetKey: 'skill:侦察' }),
+    act('理智检定', 'reaction', 'self', { targetKey: 'san' }, '', '目击可怖之物时'),
+  ],
+  dnd5e: [
+    act('攻击', 'action', 'enemy', { targetKey: 'ability:str' }, '1d8+STR', '用长剑等力量武器攻击'),
+    act('施法', 'action', 'enemy', { targetKey: 'spellAttack' }, '', '施放一个法术'),
+    act('闪避', 'action', 'self', '', '', '本回合针对你的攻击具有劣势'),
+    act('附赠：二次攻击', 'bonus', 'enemy', { targetKey: 'ability:str' }, '1d8+STR'),
+    act('借机攻击', 'reaction', 'enemy', { targetKey: 'ability:str' }, '1d8+STR'),
+  ],
+  daggerheart: [
+    act('攻击判定', 'action', 'enemy', { targetKey: 'trait:strength' }, '1d8'),
+    act('施法判定', 'action', 'enemy', { targetKey: 'spellcast' }),
+    act('反应判定', 'reaction', 'self', { targetKey: 'trait:instinct' }),
+    act('全力一击', 'action', 'enemy', '', '2d8'),
+  ],
+  huazhu: [
+    act('运炁（斗气）', 'action', 'enemy', { targetKey: 'trait:strength' }, '1d10'),
+    act('御剑', 'action', 'enemy', { targetKey: 'trait:finesse' }, '1d8'),
+    act('观气', 'action', 'none', { targetKey: 'trait:instinct' }),
+    act('反应判定', 'reaction', 'self', { targetKey: 'trait:instinct' }),
+  ],
+};
+
+/** 给一份角色数据挂上该系统的演示行动（已经有了就不动） */
+const withActions = (data, system) => {
+  if (!data.actions || !data.actions.length) data.actions = DEMO_ACTIONS[system].map(a => ({ ...a }));
+  return data;
+};
 
 /* ── 克苏鲁的呼唤 7 版 ── */
 
@@ -62,12 +116,12 @@ const cocSheet = {
 };
 
 const cocChar = store.saveCharacter(coc.id, {
-  name: cocSheet.name, system: 'coc7', data: cocSheet,
+  name: cocSheet.name, system: 'coc7', data: withActions(cocSheet, 'coc7'),
 }, { sessionId: cocSession.id });
 
 store.saveCharacter(coc.id, {
   name: '玛格丽特·凯恩', system: 'coc7',
-  data: {
+  data: withActions({
     ...structuredClone(cocSheet),
     name: '玛格丽特·凯恩', occupation: '私家侦探', age: 33, gender: '女',
     attributes: { str: 55, con: 60, siz: 55, dex: 75, app: 65, int: 70, pow: 60, edu: 65 },
@@ -76,7 +130,7 @@ store.saveCharacter(coc.id, {
     skills: { ...cocSheet.skills, 侦察: 75, 聆听: 65, 心理学: 70, 潜行: 60, '射击（手枪）': 60, 恐吓: 45, 说服: 55, 图书馆使用: 40 },
     weapons: [{ name: '柯尔特 M1911', damage: '1d10+2', range: '15 码', note: '' }],
     notes: '调查员编号 A-02。',
-  },
+  }, 'coc7'),
 }, { sessionId: cocSession.id });
 
 /* 一场已发生的判定流水 */
@@ -113,7 +167,7 @@ const dndSession = store.createSession(dnd.id, { name: '第一回：矿坑入口
 
 const dndChar = store.saveCharacter(dnd.id, {
   name: '塞拉菲娜', system: 'dnd5e',
-  data: {
+  data: withActions({
     name: '塞拉菲娜', player: '小雨', race: '高等精灵', className: '法师', level: 5,
     backgroundName: '智者', alignment: '中立善良',
     abilities: { str: 8, dex: 16, con: 14, int: 18, wis: 12, cha: 10 },
@@ -130,7 +184,7 @@ const dndChar = store.saveCharacter(dnd.id, {
     gear: '法术书、材料包、精灵斗篷、旅者服装、50 尺绳索、治疗药水 ×2、127 金币',
     features: '奥术恢复、法术塑造、精灵血统（魅惑免疫、无需睡眠）、黑暗视觉 60 尺',
     notes: '',
-  },
+  }, 'dnd5e'),
 }, { sessionId: dndSession.id });
 
 const dndRolls = [
@@ -188,7 +242,7 @@ const dhDemo = (() => {
 
 const dhChar = store.saveCharacter(dh.id, {
   name: '莉安·半月', system: 'daggerheart',
-  data: {
+  data: withActions({
     name: '莉安·半月', pronouns: '她', level: 1,
     className: dhDemo?.className ?? '战士',
     subclass: dhDemo?.subclass ?? '勇气呼唤',
@@ -212,7 +266,7 @@ const dhChar = store.saveCharacter(dh.id, {
     domainCards: dhDemo?.domainCards ?? [],
     inventory: `${dhDemo?.classItems || ''}冒险者行囊、磨刀石、家族徽记、3 枚金币、干粮 5 份`.trim(),
     notes: '',
-  },
+  }, 'daggerheart'),
 }, { sessionId: dhSession.id });
 
 const dhRolls = [
@@ -287,7 +341,7 @@ const hzData = (() => {
 })();
 
 const hzChar = hzData ? store.saveCharacter(hz.id, {
-  name: hzData.name, system: 'huazhu', data: hzData,
+  name: hzData.name, system: 'huazhu', data: withActions(hzData, 'huazhu'),
 }, { sessionId: hzSession.id }) : null;
 
 if (hzChar) {
@@ -315,6 +369,151 @@ if (hzChar) {
   }]);
 }
 
+/* ── 一场进行中的战斗（演示「行动系统」） ──
+ *
+ * 这是刻意留下的**唯一**一个进行中战斗：打开「灰鹰地窟 → 战斗」就能看到
+ * 行动条长什么样 —— 当前行动者的行动按行动经济分组，用掉的那一类已经置灰。
+ * 所有参战者（PC 与 NPC）都声明过行动，不会有人轮到时空转。
+ */
+
+let npcSeq = 0;
+const demoNpc = (name, hp, ac, init, actions, extra = {}) => ({
+  // 中文名字滤掉非 ASCII 后会变成空串，所以序号必须自己带
+  id: `cb_demo_npc${++npcSeq}`,
+  name, kind: 'npc', refId: null,
+  initiative: init,
+  hp, maxHp: hp,
+  defenseLabel: 'AC', defense: ac,
+  conditions: extra.conditions || '',
+  note: extra.note || '',
+  defeated: !!extra.defeated,
+  actions: actions.map(a => ({ ...a })),
+  // NPC 的判定数据用规则集默认值；这里直接摆一份最小可用的 D&D 数据
+  data: {
+    name,
+    abilities: { str: 12, dex: 14, con: 12, int: 8, wis: 10, cha: 8 },
+    proficiency: { skills: [], saves: [], expertise: [] },
+    level: 1,
+    combat: { hpMax: hp, hp, tempHp: 0, hitDice: '1d8', armorBase: ac, shield: 0, miscAC: 0, speed: 30, deathSuccess: 0, deathFail: 0 },
+    actions: actions.map(a => ({ ...a })),
+    ...extra.data,
+  },
+});
+
+const goblinActions = [
+  act('弯刀劈砍', 'action', 'enemy', { targetKey: 'ability:str' }, '1d6+1', '近战 · 弯刀'),
+  act('短弓射击', 'action', 'enemy', { targetKey: 'ability:dex' }, '1d6+2', '远程 · 80/320 尺'),
+  act('撤离', 'bonus', 'self', '', '', '附赠动作：脱离近战而不引发借机攻击'),
+];
+
+const bossActions = [
+  act('巨斧劈砍', 'action', 'enemy', { targetKey: 'ability:str' }, '1d12+2', '近战 · 巨斧'),
+  act('威吓咆哮', 'action', 'area', { targetKey: 'ability:cha' }, '', '范围内敌人做感知豁免，失败则恐慌'),
+  act('格挡', 'reaction', 'self', '', '', '被击中时用反应减少 1d10 伤害'),
+];
+
+const DEMO_BATTLE = {
+  active: true,
+  round: 1,
+  turnIndex: 0,
+  combatants: [
+    {
+      id: 'cb_demo_serafina',
+      name: '塞拉菲娜', kind: 'pc', refId: dndChar.id,
+      initiative: 19,
+      hp: 27, maxHp: 32,
+      defenseLabel: 'AC', defense: 15,
+      conditions: '', note: '',
+      defeated: false,
+      actions: [],
+    },
+    demoNpc('哥布林头目', 21, 17, 16, bossActions),
+    demoNpc('哥布林 A', 7, 15, 11, goblinActions, {
+      defeated: true,
+      conditions: '已倒地',
+      note: '被塞拉菲娜的魔法飞弹打翻，还剩 0 点生命',
+    }),
+    demoNpc('哥布林 B', 7, 15, 9, goblinActions),
+  ],
+  // 塞拉菲娜这一回合已经用掉了主要动作，所以「攻击」按钮是置灰的
+  used: { cb_demo_serafina: { action: true } },
+};
+
+store.saveState(dnd.id, { combat: DEMO_BATTLE });
+
+for (const e of [
+  {
+    type: 'combat', actor: dndChar.id, actorName: '塞拉菲娜',
+    title: '战斗开始',
+    detail: '1. 塞拉菲娜（先攻 19）\n2. 哥布林头目（先攻 16）\n3. 哥布林 A（先攻 11）\n4. 哥布林 B（先攻 9）',
+  },
+  {
+    type: 'combat', actor: dndChar.id, actorName: '塞拉菲娜',
+    title: '战斗开始 · 掷先攻',
+    detail: '塞拉菲娜 18 + 1 = 19\n哥布林头目 16\n哥布林 A 11\n哥布林 B 9',
+  },
+]) store.appendEvents(dnd.id, dndSession.id, [e]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'combat', actor: dndChar.id, actorName: '塞拉菲娜',
+  title: '塞拉菲娜 使用【施法】 → 哥布林 A',
+  detail: [
+    '目标：哥布林 A（AC 15）',
+    '行动经济：主要动作',
+    '施放一个法术',
+    'd20 = 16 · 法术攻击 +7 · 总计 23 · DC 15 · 结果：成功',
+    '伤害 3d4+4 = 13',
+  ].join('\n'),
+  seed: 'DEMOBATTLE001',
+  data: {
+    kind: 'action',
+    action: { name: '施法', kind: 'action', target: 'enemy', check: { targetKey: 'spellAttack' }, damage: '3d4+4', cost: {}, note: '魔法飞弹' },
+    result: { roll: 16, total: 23, dc: 15, success: true },
+    damage: { ok: true, expr: '3d4+4', total: 13 },
+  },
+}]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'combat', actor: null, actorName: null,
+  title: '哥布林 A 受到伤害 13 点',
+  detail: '生命值 0/7（已倒地）',
+  tags: ['伤害'],
+}]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'combat', actor: null, actorName: null,
+  title: '哥布林 A 倒地',
+  detail: '剩余生命 0/7',
+}]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'combat', actor: dndChar.id, actorName: '塞拉菲娜',
+  title: '塞拉菲娜 使用【附赠：二次攻击】 → 哥布林头目',
+  detail: [
+    '目标：哥布林头目（AC 17）',
+    '行动经济：附赠动作',
+    'd20 = 4 · 力量检定 +2 · 总计 6 · DC 17 · 结果：失败',
+  ].join('\n'),
+  seed: 'DEMOBATTLE002',
+  data: {
+    kind: 'action',
+    action: { name: '附赠：二次攻击', kind: 'bonus', target: 'enemy', check: { targetKey: 'ability:str' }, damage: '1d8+STR', cost: {}, note: '' },
+    result: { roll: 4, total: 6, dc: 17, success: false },
+    damage: null,
+  },
+}]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'scene', title: '矿坑第一层：塌方的岔道',
+  detail: '支撑木已经朽了，头顶不断落下细沙。哥布林把俘虏拖进了左边的深坑——地上拖行的血迹还很新鲜。',
+}]);
+
+store.appendEvents(dnd.id, dndSession.id, [{
+  type: 'note', title: '提示：战斗中的判定只能按已声明的行动来',
+  detail: '演示战斗里每个人的行动都声明好了。用掉的那一类行动经济会置灰，点「下一回合」刷新；'
+    + '倒地的参战者会被自动跳过。要自由掷骰（伤害、暗骰）用「判定」页下方的自由骰式。',
+}]);
+
 /* ── 汇总 ── */
 
 console.log('\n已生成演示数据：');
@@ -323,3 +522,5 @@ for (const c of store.listCampaigns()) {
   console.log(`  · ${c.name.padEnd(10, '　')} [${c.system}]  角色 ${s.characters} · 场次 ${s.sessions} · 事件 ${s.events}`);
 }
 console.log('\n直接运行 npm start 即可看到以上内容。');
+console.log('「灰鹰地窟 → 战斗」里留了一场进行中的示范战斗，每个参战者都声明过行动，');
+console.log('当前行动者塞拉菲娜的主要动作已经用掉（按钮置灰），点「下一回合 →」就能看到它刷新。');
