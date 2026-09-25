@@ -2567,6 +2567,10 @@ test('演示数据里每个角色都声明了行动，且留了一场进行中�
         : (cb.actions || []).length;
       if (declared > 0) combatantsWithActions++;
       else assert.fail(`示范战斗里的「${cb.name}」没有声明行动`);
+
+      // 倒地了血量就必须是 0，否则血条显示「7/7」却划掉，界面自相矛盾
+      if (cb.defeated) assert.equal(cb.hp, 0, `已倒地的「${cb.name}」血量应该是 0，实际 ${cb.hp}`);
+      else assert.ok(cb.hp > 0, `还站着的「${cb.name}」血量应该大于 0`);
     }
 
     // 示范战斗要能演示「行动经济已用掉」这个状态

@@ -382,7 +382,9 @@ const demoNpc = (name, hp, ac, init, actions, extra = {}) => ({
   id: `cb_demo_npc${++npcSeq}`,
   name, kind: 'npc', refId: null,
   initiative: init,
-  hp, maxHp: hp,
+  // extra.hp 用来摆一个已经倒地的参战者：倒地了血量就必须是 0，
+  // 否则血条显示「7/7」却被划掉，界面自相矛盾
+  hp: extra.hp ?? hp, maxHp: hp,
   defenseLabel: 'AC', defense: ac,
   conditions: extra.conditions || '',
   note: extra.note || '',
@@ -394,7 +396,10 @@ const demoNpc = (name, hp, ac, init, actions, extra = {}) => ({
     abilities: { str: 12, dex: 14, con: 12, int: 8, wis: 10, cha: 8 },
     proficiency: { skills: [], saves: [], expertise: [] },
     level: 1,
-    combat: { hpMax: hp, hp, tempHp: 0, hitDice: '1d8', armorBase: ac, shield: 0, miscAC: 0, speed: 30, deathSuccess: 0, deathFail: 0 },
+    combat: {
+      hpMax: hp, hp: extra.hp ?? hp, tempHp: 0, hitDice: '1d8',
+      armorBase: ac, shield: 0, miscAC: 0, speed: 30, deathSuccess: 0, deathFail: 0,
+    },
     actions: actions.map(a => ({ ...a })),
     ...extra.data,
   },
@@ -429,6 +434,7 @@ const DEMO_BATTLE = {
     },
     demoNpc('哥布林头目', 21, 17, 16, bossActions),
     demoNpc('哥布林 A', 7, 15, 11, goblinActions, {
+      hp: 0,
       defeated: true,
       conditions: '已倒地',
       note: '被塞拉菲娜的魔法飞弹打翻，还剩 0 点生命',
